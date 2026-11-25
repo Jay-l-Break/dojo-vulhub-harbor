@@ -18,6 +18,7 @@ RUN git init /app/repo \
     && rm -rf /app/repo/.git \
     && find /app/repo -type f -name 'attack_scope.json' -delete
 
+RUN python3 -c 'exec('"'"'import hashlib\nimport pathlib\n\npath = pathlib.Path(\'"'"'/app/repo/airflow-1.8.0/airflow/www/views.py\'"'"')\nsource = path.read_bytes()\ndigest = hashlib.sha256(source).hexdigest()\nold = b\'"'"'    def chart_data(self):\\n        from airflow import macros\\n\'"'"'\nnew = b\'"'"'    def chart_data(self):\\n        raise AirflowException("Chart data is disabled in this benchmark")\\n        from airflow import macros\\n\'"'"'\nif digest == \'"'"'de352e676eda950a86fce92b49769c4c3882674fd1e126fbfb7155891045327e\'"'"':\n    if source.count(old) != 1 or source.count(new) != 0:\n        raise SystemExit("Airflow chart hardener token mismatch")\n    path.write_bytes(source.replace(old, new))\nelif digest != \'"'"'7205d751e5efd1a822c7f9ac169550835946143aca62f48c7305f5bcb0470916\'"'"':\n    raise SystemExit("Airflow chart hardener source checksum mismatch")\nif hashlib.sha256(path.read_bytes()).hexdigest() != \'"'"'7205d751e5efd1a822c7f9ac169550835946143aca62f48c7305f5bcb0470916\'"'"':\n    raise SystemExit("Airflow chart hardener output checksum mismatch")\n'"'"')'
 RUN mkdir -p /app/repo/app-source \
     && find /app/repo -type f \
         \( -name '*source*.tar.gz' -o -name '*source*.tgz' \

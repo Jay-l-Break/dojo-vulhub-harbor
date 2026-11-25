@@ -312,6 +312,32 @@ class PublicChallengeTest(unittest.TestCase):
 class SeedLifecycleTest(unittest.TestCase):
     """Exercises one-time random seeding and target-volume cleanup."""
 
+    def test_rce_target_setup_does_not_require_oracle_helper_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parsed = runtime_oracle.parse_runtime_config(
+                make_runtime_document("remote_code_execution", root)
+            )
+            trigger = dict(parsed.trigger_checks[0])
+            trigger["helper_path"] = str(root / "oracle-only-helper")
+            config = dataclasses.replace(parsed, trigger_checks=(trigger,))
+            paths = service_paths(root)
+            service = runtime_oracle.RuntimeOracleService(config, **paths)
+            service.initialize()
+            install_path = paths["seed_dir"] / "install.sh"
+            script = install_path.read_text(encoding="utf-8")
+
+            self.assertNotIn(trigger["helper_path"], script)
+            subprocess.run(["/bin/sh", str(install_path)], check=True)
+            self.assertTrue(service.monitor_setup_once())
+            self.assertFalse(
+                runtime_oracle.runtime_health(
+                    config,
+                    paths["state_path"],
+                    paths["socket_path"],
+                )
+            )
+
     def test_install_self_deletes_before_ready_and_never_reappears(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

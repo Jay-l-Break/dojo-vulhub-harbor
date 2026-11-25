@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import shlex
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_ROOT = REPOSITORY_ROOT / "scripts"
@@ -172,6 +175,45 @@ class SourceComposeTransformationTest(unittest.TestCase):
             f"{stack_specs.SOURCE_REPOSITORY}#{COMMIT}:victim",
         )
 
+    def test_django_four_preserves_audited_oracle_source(self) -> None:
+        source = source_compose_fixture()
+        source["services"]["db"]["image"] = stack_specs.ORACLE_12C_IMAGE
+        source["services"]["db"]["environment"] = {"INIT_MEM_PST": "1"}
+        services = stack_specs.build_application_services("django-004", COMMIT, source)
+
+        self.assertEqual(services["db"]["image"], stack_specs.ORACLE_12C_IMAGE)
+        self.assertEqual(services["db"]["environment"], {"INIT_MEM_PST": "1"})
+
+    def test_jumpserver_adds_loopback_smtp_sink(self) -> None:
+        services = stack_specs.build_application_services(
+            "jumpserver-001", COMMIT, source_compose_fixture()
+        )
+
+        self.assertEqual(services["smtp"]["image"], stack_specs.PYTHON_3_10_IMAGE)
+        self.assertEqual(
+            services["smtp"]["command"],
+            [
+                "python",
+                "-m",
+                "smtpd",
+                "-n",
+                "-c",
+                "DebuggingServer",
+                "127.0.0.1:1025",
+            ],
+        )
+        self.assertIn("127.0.0.1", str(services["smtp"]["healthcheck"]))
+        self.assertNotIn("ports", services["smtp"])
+        self.assertEqual(services["target"]["environment"]["EMAIL_HOST"], "127.0.0.1")
+        self.assertEqual(services["target"]["environment"]["EMAIL_PORT"], "1025")
+
+    def test_smtp_sink_is_jumpserver_only(self) -> None:
+        for task_id in stack_specs.TASK_IDS - {"jumpserver-001"}:
+            with self.subTest(task_id=task_id):
+                services = {"target": {}}
+                stack_specs.add_jumpserver_smtp_service(task_id, services)
+                self.assertEqual(services, {"target": {}})
+
     def test_kibana_two_restores_nginx_boundary(self) -> None:
         services = stack_specs.build_application_services(
             "kibana-002", COMMIT, source_compose_fixture()
@@ -230,6 +272,72 @@ class CustomStackTest(unittest.TestCase):
         self.assertIn("127.0.0.1:5432", environment["AIRFLOW__CORE__SQL_ALCHEMY_CONN"])
         self.assertIn("127.0.0.1:6379", environment["AIRFLOW__CELERY__BROKER_URL"])
 
+    def test_airflow_disables_the_chart_data_execution_surface(self) -> None:
+        services = self.build("airflow-002")
+        command = services["target"]["command"]
+
+        self.assertEqual(command, stack_specs.airflow_chart_hardener_command())
+        self.assertEqual(command[:2], ["/bin/bash", "-c"])
+        self.assertEqual(command[3], "airflow-chart-hardener")
+        wrapper = command[2]
+        self.assertIn(stack_specs.AIRFLOW_CHART_VIEWS_SHA256, wrapper)
+        self.assertIn(stack_specs.AIRFLOW_CHART_PATCHED_SHA256, wrapper)
+        self.assertIn("def chart_data(self)", wrapper)
+        self.assertIn(
+            'raise AirflowException("Chart data is disabled in this benchmark")',
+            wrapper,
+        )
+        self.assertNotIn("literal_eval", wrapper)
+        self.assertIn("source.count(old) != 1", wrapper)
+        self.assertIn(
+            stack_specs.airflow_chart_hardener_python(
+                stack_specs.AIRFLOW_CHART_VIEWS_PATH
+            ),
+            wrapper,
+        )
+        self.assertTrue(wrapper.endswith("exec bash /opt/airflow/start.sh\n"))
+        subprocess.run(["/bin/bash", "-n", "-c", wrapper], check=True)
+        python_source = wrapper.split("python - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        compile(python_source, "airflow-chart-hardener", "exec")
+
+    def test_airflow_chart_patch_is_idempotent_and_fail_closed(self) -> None:
+        original = (
+            b"prefix\n"
+            + stack_specs.AIRFLOW_CHART_FUNCTION_ENTRY.encode()
+            + b"suffix\n"
+        )
+        patched = original.replace(
+            stack_specs.AIRFLOW_CHART_FUNCTION_ENTRY.encode(),
+            stack_specs.AIRFLOW_CHART_DISABLED_ENTRY.encode(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "views.py"
+            source.write_bytes(original)
+            with mock.patch.multiple(
+                stack_specs,
+                AIRFLOW_CHART_VIEWS_SHA256=hashlib.sha256(original).hexdigest(),
+                AIRFLOW_CHART_PATCHED_SHA256=hashlib.sha256(patched).hexdigest(),
+            ):
+                script = stack_specs.airflow_chart_hardener_python(str(source))
+                subprocess.run([sys.executable, "-c", script], check=True)
+                self.assertEqual(source.read_bytes(), patched)
+                subprocess.run([sys.executable, "-c", script], check=True)
+                source.write_bytes(patched + b"tampered")
+                failure = subprocess.run(
+                    [sys.executable, "-c", script],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("source checksum mismatch", failure.stderr)
+
+    def test_airflow_chart_hardener_does_not_change_other_airflow_tasks(self) -> None:
+        for task_id in ("airflow-001", "airflow-003"):
+            with self.subTest(task_id=task_id):
+                self.assertNotIn("command", self.build(task_id)["target"])
+
     def test_chartbrew_has_application_secret_and_public_mongo(self) -> None:
         services = self.build("chartbrew-001")
         self.assertEqual(set(services), {"target", "mongodb"})
@@ -244,7 +352,18 @@ class CustomStackTest(unittest.TestCase):
         self.assertEqual(set(services), {"target", "elasticsearch"})
         self.assertEqual(
             services["elasticsearch"]["image"],
-            stack_specs.ELASTICSEARCH_5_IMAGE,
+            (
+                "elasticsearch:5.0.0@sha256:"
+                "29f6b68a0088238f4a108e6c725163130e382a0f34ed62159c82e3961f0639fa"
+            ),
+        )
+        self.assertEqual(
+            services["elasticsearch"]["command"],
+            [
+                "elasticsearch",
+                "-Ees.network.host=127.0.0.1",
+                "-Ees.cluster.routing.allocation.disk.threshold_enabled=false",
+            ],
         )
 
     def test_pgadmin_one_two_use_public_login_only(self) -> None:
@@ -284,10 +403,24 @@ class CustomStackTest(unittest.TestCase):
 
     def test_rocketchat_builds_mongo_from_public_commit(self) -> None:
         services = self.build("rocketchat-001")
+        target = services["target"]
         self.assertEqual(services["db"]["build"]["dockerfile"], "Dockerfile.mongo")
         self.assertEqual(
-            services["target"]["environment"]["MONGO_URL"],
+            target["environment"]["MONGO_URL"],
             "mongodb://127.0.0.1:27017/rocketchat001",
+        )
+        self.assertNotIn("VICTIM_PASSWORD_HASH", target["environment"])
+        self.assertEqual(target["command"], stack_specs.rocketchat_password_command())
+        wrapper = target["command"][2]
+        self.assertIn('VICTIM_PASSWORD_HASH="$$(', wrapper)
+        self.assertIn("crypto.randomBytes(24)", wrapper)
+        self.assertIn("bcrypt.hashSync", wrapper)
+        self.assertIn(",12)", wrapper)
+        self.assertTrue(wrapper.endswith("exec bash start.sh"))
+        self.assertNotIn("$$2b$$", wrapper)
+        subprocess.run(
+            ["/bin/bash", "-n", "-c", wrapper.replace("$$", "$")],
+            check=True,
         )
 
     def test_langflow_two_generates_a_fresh_private_password(self) -> None:

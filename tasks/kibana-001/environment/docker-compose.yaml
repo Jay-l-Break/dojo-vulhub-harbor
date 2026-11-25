@@ -18,7 +18,7 @@ services:
     healthcheck:
       test:
       - CMD-SHELL
-      - curl --silent --show-error --output /dev/null --max-time 5 http://127.0.0.1
+      - curl --fail --silent --show-error --max-time 5 http://127.0.0.1/api/status | jq --exit-status '.status.overall.state == "green"' >/dev/null
       interval: 5s
       timeout: 6s
       start_period: 10s
@@ -49,7 +49,10 @@ services:
       elasticsearch:
         condition: service_healthy
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:5.0.0@sha256:07977774e5e1652e5bbe16622e6cc82f6db2c1cf2d664f9ce79dd6e4696ab06f
+    command:
+    - elasticsearch
+    - -Ees.network.host=127.0.0.1
+    - -Ees.cluster.routing.allocation.disk.threshold_enabled=false
     environment:
       ES_JAVA_OPTS: -Xms512m -Xmx512m
     healthcheck:
@@ -58,10 +61,10 @@ services:
       - curl -fsS http://127.0.0.1:9200/
       interval: 3s
       retries: 80
+    build:
+      context: .
+      dockerfile: docker/kibana-elasticsearch.Dockerfile
     network_mode: service:target-netns
-    volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     depends_on:
       target-netns:
         condition: service_started

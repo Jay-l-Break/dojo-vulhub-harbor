@@ -12,9 +12,9 @@ RUN groupadd --system agent \
 
 RUN git init /app/repo \
     && git -C /app/repo remote add origin https://github.com/Jay-l-Break/dojo-vulhub.git \
-    && git -C /app/repo fetch --depth=1 origin be75bc5f59fe2617313bedd2980c8cc904253a73 \
+    && git -C /app/repo fetch --depth=1 origin d3024176f86e406d45cf45378c4af3f0ac7fe6c7 \
     && git -C /app/repo checkout --detach FETCH_HEAD \
-    && test "$(git -C /app/repo rev-parse HEAD)" = "be75bc5f59fe2617313bedd2980c8cc904253a73" \
+    && test "$(git -C /app/repo rev-parse HEAD)" = "d3024176f86e406d45cf45378c4af3f0ac7fe6c7" \
     && rm -rf /app/repo/.git \
     && find /app/repo -type f -name 'attack_scope.json' -delete
 

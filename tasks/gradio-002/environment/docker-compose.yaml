@@ -36,8 +36,6 @@ services:
       dockerfile_inline: "FROM python:3.10-slim-bookworm@sha256:5be5aaecb962a41567bc8041f1e9e3432cb085b037fe057f9a562630b2e4b370\n\nRUN pip install --no-cache-dir \\\n    \"huggingface-hub==0.20.3\" \\\n    \"fastapi==0.104.1\" \\\n    \"pydantic==2.4.2\" \\\n    \"starlette==0.27.0\" \\\n    \"jinja2==3.1.2\" \\\n    \"anyio<4\" \\\n    \"gradio==4.0.0\"\n\nWORKDIR /app\nCOPY gradio /app/gradio\nCOPY app.py /app/app.py\n\nEXPOSE 80\nCMD [\"python\", \"app.py\"]\n"
     network_mode: service:target-netns
     volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     - oracle-seed:/run/dojo-seed
     post_start:
     - command: /bin/sh /run/dojo-seed/install.sh

@@ -40,8 +40,6 @@ services:
       \ \\\n      && workflow_id=$$(jq -er '.data.id' <<<\"$$workflow_response\" 2>/dev/null); then\n    break\n  fi\n  workflow_id=\n  if [[ \"$$attempt\" -eq 150 ]]; then\n    exit 1\n  fi\n  sleep 2\ndone\nWORKFLOW_EOF\ntail -n +39 \"$$source_init\" >> \"$$patched_init\"\nexec /bin/bash \"$$patched_init\"\n"
     network_mode: service:target-netns
     volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     - oracle-seed:/run/dojo-seed
     post_start:
     - command: /bin/sh /run/dojo-seed/install.sh

@@ -18,7 +18,7 @@ services:
     healthcheck:
       test:
       - CMD-SHELL
-      - curl --silent --show-error --output /dev/null --max-time 5 http://127.0.0.1
+      - curl --fail --silent --show-error --max-time 5 http://127.0.0.1/health/ | grep --quiet --line-regexp ready
       interval: 5s
       timeout: 6s
       start_period: 10s
@@ -40,8 +40,6 @@ services:
       DJANGO_SECRET_KEY: ''
     network_mode: service:target-netns
     volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     - oracle-seed:/run/dojo-seed
     post_start:
     - command: /bin/sh /run/dojo-seed/install.sh
@@ -54,13 +52,10 @@ services:
       db:
         condition: service_started
   db:
-    image: vulhub/oracle:12c-ee@sha256:abe33a2b9fc36ad01d364ac61c87eadae90e3bf857c72bcc81de8480b037227f
-    environment:
-      INIT_MEM_PST: '1'
+    build:
+      context: .
+      dockerfile: docker/oracle-db.Dockerfile
     network_mode: service:target-netns
-    volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     depends_on:
       target-netns:
         condition: service_started

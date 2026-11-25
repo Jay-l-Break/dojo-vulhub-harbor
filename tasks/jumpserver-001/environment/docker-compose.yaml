@@ -42,9 +42,6 @@ services:
       interval: 2s
       retries: 40
     network_mode: service:target-netns
-    volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     depends_on:
       target-netns:
         condition: service_started
@@ -58,13 +55,17 @@ services:
       DB_PASSWORD: jumpserver-local-test
       DB_NAME: jumpserver
       CORE_WORKER: '1'
+      EMAIL_HOST: 127.0.0.1
+      EMAIL_PORT: '1025'
     network_mode: service:target-netns
+    configs:
+    - source: jumpserver-hardener
+      target: /opt/dojo/jumpserver-hardener.sh
+      mode: '0555'
     volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     - oracle-seed:/run/dojo-seed
     post_start:
-    - command: /bin/sh /run/dojo-seed/install.sh
+    - command: /bin/sh /opt/dojo/jumpserver-hardener.sh
       user: root
     depends_on:
       oracle-init:
@@ -73,6 +74,31 @@ services:
         condition: service_started
       mariadb:
         condition: service_healthy
+      smtp:
+        condition: service_healthy
+  smtp:
+    image: python:3.10-slim-bookworm@sha256:5be5aaecb962a41567bc8041f1e9e3432cb085b037fe057f9a562630b2e4b370
+    command:
+    - python
+    - -m
+    - smtpd
+    - -n
+    - -c
+    - DebuggingServer
+    - 127.0.0.1:1025
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import socket; s=socket.create_connection(('127.0.0.1', 1025), 2); assert s.recv(3) == b'220'; s.close()
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    network_mode: service:target-netns
+    depends_on:
+      target-netns:
+        condition: service_started
   oracle-init:
     build:
       context: .
@@ -148,3 +174,6 @@ volumes:
   oracle-seed: {}
   oracle-proof: {}
   oracle-socket: {}
+configs:
+  jumpserver-hardener:
+    file: ./shell/jumpserver-hardener.sh

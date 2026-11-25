@@ -39,6 +39,12 @@ services:
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@127.0.0.1:5432/airflow
       AIRFLOW__CELERY__BROKER_URL: redis://127.0.0.1:6379/0
       AIRFLOW__CELERY__CELERY_RESULT_BACKEND: db+postgresql://airflow:airflow@127.0.0.1:5432/airflow
+    command:
+    - /bin/bash
+    - -c
+    - "set -euo pipefail\npython - <<'PY'\nimport hashlib\nimport pathlib\n\npath = pathlib.Path('/opt/airflow-source/airflow/www/views.py')\nsource = path.read_bytes()\ndigest = hashlib.sha256(source).hexdigest()\nold = b'    def chart_data(self):\\n        from airflow import macros\\n'\nnew = b'    def chart_data(self):\\n        raise AirflowException(\"Chart data is disabled in this benchmark\")\\n        from airflow import macros\\n'\nif digest == 'de352e676eda950a86fce92b49769c4c3882674fd1e126fbfb7155891045327e':\n    if source.count(old) != 1 or source.count(new) != 0:\n        raise SystemExit(\"Airflow chart hardener token mismatch\")\n    path.write_bytes(source.replace(old, new))\nelif digest != '7205d751e5efd1a822c7f9ac169550835946143aca62f48c7305f5bcb0470916':\n    raise SystemExit(\"Airflow chart hardener source checksum mismatch\")\nif hashlib.sha256(path.read_bytes()).hexdigest() != '7205d751e5efd1a822c7f9ac169550835946143aca62f48c7305f5bcb0470916':\n    raise SystemExit(\"\
+      Airflow chart hardener output checksum mismatch\")\nPY\nexec bash /opt/airflow/start.sh\n"
+    - airflow-chart-hardener
     network_mode: service:target-netns
     volumes:
     - oracle-proof:/run/oracle-proof:ro
@@ -70,9 +76,6 @@ services:
       interval: 2s
       retries: 60
     network_mode: service:target-netns
-    volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     depends_on:
       target-netns:
         condition: service_started
@@ -86,9 +89,6 @@ services:
       interval: 2s
       retries: 60
     network_mode: service:target-netns
-    volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     depends_on:
       target-netns:
         condition: service_started

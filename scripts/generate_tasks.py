@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -45,6 +46,10 @@ ORACLE_BASE_IMAGE = (
 GO_BASE_IMAGE = (
     "public.ecr.aws/docker/library/golang:1.24-bookworm@"
     "sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac"
+)
+CURL_BASE_IMAGE = (
+    "curlimages/curl:8.11.1@"
+    "sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 )
 EXPECTED_TASK_COUNT = 54
 EXPECTED_GROUP_COUNT = 55
@@ -93,6 +98,29 @@ COMFY_REPLACEMENT = (
     '("127.0.0.1", port), handler)'
 )
 N8N_INIT_SHA256 = "6aaf8922988f3feecebcaa333cece95aab5749d841da633b639d836c2c10fe24"
+SOURCE_COMMIT_OVERRIDES = {
+    "rocketchat-001": "d3024176f86e406d45cf45378c4af3f0ac7fe6c7",
+}
+ORACLE_DB_ENTRYPOINT_SHA256 = (
+    "174780d6c593c3363b22ded6ca41e9dca49c646ceba005efb42c11292dc80e8d"
+)
+JUMPSERVER_HARDENER_CONFIG = "jumpserver-hardener"
+JUMPSERVER_HARDENER_SOURCE = "./shell/jumpserver-hardener.sh"
+JUMPSERVER_HARDENER_TARGET = "/opt/dojo/jumpserver-hardener.sh"
+JUMPSERVER_HARDENER_COMMAND = "/bin/sh /opt/dojo/jumpserver-hardener.sh"
+TARGET_COLLECT_VOLUME = "target-collect"
+TARGET_COLLECT_DIRECTORY = "/run/dojo-collect"
+TARGET_COLLECT_SCRIPT = f"{TARGET_COLLECT_DIRECTORY}/collect.sh"
+ORACLE_DB_MEMORY_MB = "2560"
+AIRFLOW_AGENT_CHART_VIEWS_PATH = "/app/repo/airflow-1.8.0/airflow/www/views.py"
+ELASTICSEARCH_ALPHA2_URL = (
+    "https://download.elastic.co/elasticsearch/release/org/elasticsearch/"
+    "distribution/tar/elasticsearch/5.0.0-alpha2/"
+    "elasticsearch-5.0.0-alpha2.tar.gz"
+)
+ELASTICSEARCH_ALPHA2_SHA256 = (
+    "df8b204ccede97d3a2c38efddacce59eaac9a4ef19d107eb0f048b33a720e584"
+)
 FILE_CREATION_POC_REPLACEMENTS = {
     ("airflow-001", "vuln-01-command-injection.py"): (
         'TARGET_FILE = "/tmp/airflow_001_created"',
@@ -284,6 +312,18 @@ def load_source_commits(counts_path: pathlib.Path) -> dict[str, str]:
             raise ValueError(f"Invalid source commit entry: {entry}")
         commits[task_id] = commit
     return commits
+
+
+def apply_source_commit_overrides(commits: Mapping[str, str]) -> dict[str, str]:
+    """Replace stale ledger commits with audited task revisions."""
+    resolved = dict(commits)
+    missing = set(SOURCE_COMMIT_OVERRIDES) - set(resolved)
+    if missing:
+        raise ValueError(
+            f"Source commit overrides have no ledger task: {sorted(missing)}"
+        )
+    resolved.update(SOURCE_COMMIT_OVERRIDES)
+    return resolved
 
 
 def verify_source_commit(repository: pathlib.Path, task_id: str, commit: str) -> None:
@@ -512,6 +552,57 @@ def pin_remote_dockerfiles(
         service["build"] = updated
 
 
+def adapt_oracle_database_service(
+    task_id: str, services: dict[str, dict[str, object]]
+) -> None:
+    """Use the fixed-memory local Oracle image for django-004."""
+    if task_id != "django-004":
+        return
+    database = services.get("db")
+    if not isinstance(database, dict):
+        raise TypeError("django-004 has no database service")
+    if database.get("image") != stack_specs.ORACLE_12C_IMAGE:
+        raise ValueError("django-004 database image differs from the audited digest")
+    if "build" in database:
+        raise ValueError("django-004 database unexpectedly defines a build")
+    environment = database.get("environment")
+    if not isinstance(environment, dict) or environment.get("INIT_MEM_PST") != "1":
+        raise ValueError("django-004 database lacks the audited memory percentage")
+    environment = dict(environment)
+    environment.pop("INIT_MEM_PST")
+    database.pop("image")
+    if environment:
+        database["environment"] = environment
+    else:
+        database.pop("environment")
+    database["build"] = {
+        "context": ".",
+        "dockerfile": "docker/oracle-db.Dockerfile",
+    }
+
+
+def adapt_kibana_elasticsearch_service(
+    task_id: str, services: dict[str, dict[str, object]]
+) -> None:
+    """Install Elasticsearch alpha2 on the compatible pinned Java base."""
+    if task_id != "kibana-001":
+        return
+    elasticsearch = services.get("elasticsearch")
+    if not isinstance(elasticsearch, dict):
+        raise TypeError("kibana-001 has no Elasticsearch service")
+    if elasticsearch.get("image") != stack_specs.ELASTICSEARCH_5_IMAGE:
+        raise ValueError(
+            "kibana-001 Elasticsearch base differs from the audited digest"
+        )
+    if "build" in elasticsearch:
+        raise ValueError("kibana-001 Elasticsearch unexpectedly defines a build")
+    elasticsearch.pop("image")
+    elasticsearch["build"] = {
+        "context": ".",
+        "dockerfile": "docker/kibana-elasticsearch.Dockerfile",
+    }
+
+
 def n8n_entrypoint_script() -> str:
     """Return the bounded n8n public-seed startup workaround."""
     script = f"""set -euo pipefail
@@ -603,6 +694,57 @@ def target_mounts() -> list[str]:
     ]
 
 
+def rce_capability_services(runtime_config: Mapping[str, object]) -> set[str]:
+    """Return application services named by RCE trigger checks."""
+    services: set[str] = set()
+    entries = runtime_config.get("trigger_checks", [])
+    if not isinstance(entries, list):
+        raise TypeError("trigger_checks must be a list")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise TypeError("trigger_checks entries must be mappings")
+        if entry.get("kind") != "rce":
+            continue
+        target_service = entry.get("target_service")
+        if not isinstance(target_service, str) or not target_service:
+            raise TypeError("trigger_checks.target_service must be a string")
+        services.add(target_service)
+    return services
+
+
+def add_service_volumes(
+    service: dict[str, object], additions: Sequence[object]
+) -> None:
+    """Add unique volumes without replacing service-specific mounts."""
+    current = service.get("volumes", [])
+    if not isinstance(current, list):
+        raise TypeError("service volumes must be a list")
+    volumes = copy.deepcopy(current)
+    for addition in additions:
+        if addition not in volumes:
+            volumes.append(copy.deepcopy(addition))
+    if volumes:
+        service["volumes"] = volumes
+
+
+def service_volume_targets(service: Mapping[str, object]) -> set[str]:
+    """Return the container paths mounted by one service."""
+    volumes = service.get("volumes", [])
+    if not isinstance(volumes, list):
+        raise TypeError("service volumes must be a list")
+    targets: set[str] = set()
+    for volume in volumes:
+        if isinstance(volume, str):
+            fields = volume.split(":")
+            if len(fields) >= 2:
+                targets.add(fields[1])
+        elif isinstance(volume, dict):
+            target = volume.get("target")
+            if isinstance(target, str):
+                targets.add(target)
+    return targets
+
+
 def has_file_creation(task: TaskSource) -> bool:
     """Return whether a task needs the isolated observed proof volume."""
     entries = task.runtime_config.get("file_creations", [])
@@ -653,14 +795,43 @@ def application_services(
     services = copy.deepcopy(task.application_services)
     add_n8n_workaround(task.task_id, services)
     pin_remote_dockerfiles(task, services, source_repository)
+    adapt_oracle_database_service(task.task_id, services)
+    adapt_kibana_elasticsearch_service(task.task_id, services)
+    capability_services = rce_capability_services(task.runtime_config)
+    missing_services = capability_services - set(services)
+    if missing_services:
+        raise ValueError(
+            f"Oracle capability targets are not application services: "
+            f"{sorted(missing_services)}"
+        )
     target = services["target"]
     target["network_mode"] = "service:target-netns"
-    target["volumes"] = [*target_mounts(), "oracle-seed:/run/dojo-seed"]
+    target_additions: list[object] = ["oracle-seed:/run/dojo-seed"]
+    if "target" in capability_services:
+        target_additions = [*target_mounts(), *target_additions]
+    if task.task_id == "jumpserver-001":
+        target["configs"] = [
+            {
+                "source": JUMPSERVER_HARDENER_CONFIG,
+                "target": JUMPSERVER_HARDENER_TARGET,
+                "mode": "0555",
+            }
+        ]
     if has_file_creation(task):
-        target["volumes"].append("file-creation-observed:/tmp/dojo-file-creation")
+        target_additions.append("file-creation-observed:/tmp/dojo-file-creation")
+    if has_target_collect(task):
+        target_additions.append(
+            f"{TARGET_COLLECT_VOLUME}:{TARGET_COLLECT_DIRECTORY}:ro"
+        )
+    add_service_volumes(target, target_additions)
+    post_start_command = (
+        JUMPSERVER_HARDENER_COMMAND
+        if task.task_id == "jumpserver-001"
+        else "/bin/sh /run/dojo-seed/install.sh"
+    )
     target["post_start"] = [
         {
-            "command": "/bin/sh /run/dojo-seed/install.sh",
+            "command": post_start_command,
             "user": "root",
         }
     ]
@@ -676,7 +847,8 @@ def application_services(
         if name == "target":
             continue
         service["network_mode"] = "service:target-netns"
-        service["volumes"] = target_mounts()
+        if name in capability_services:
+            add_service_volumes(service, target_mounts())
         service["depends_on"] = {"target-netns": {"condition": "service_started"}}
     return services
 
@@ -690,6 +862,29 @@ def main_healthcheck(task_id: str) -> dict[str, object]:
     """Build the main-side retry probe through the forward bridge."""
     if stack_specs.health_mode(task_id) == "tcp":
         command = "nc -z -w 5 127.0.0.1 80"
+    elif task_id == "django-004":
+        command = (
+            "curl --fail --silent --show-error --max-time 5 "
+            "http://127.0.0.1/health/ | grep --quiet --line-regexp ready"
+        )
+    elif task_id in {"kibana-001", "kibana-002"}:
+        command = (
+            "curl --fail --silent --show-error --max-time 5 "
+            "http://127.0.0.1/api/status | "
+            "jq --exit-status '.status.overall.state == \"green\"' >/dev/null"
+        )
+    elif task_id == "kibana-003":
+        command = (
+            "curl --fail --silent --show-error "
+            "--user telemetry_writer:kibana003_lab_writer --max-time 5 "
+            "http://127.0.0.1/api/status | "
+            "jq --exit-status '.status.overall.state == \"green\"' >/dev/null"
+        )
+    elif task_id == "rocketchat-001":
+        command = (
+            "curl --fail --silent --show-error --output /dev/null --max-time 5 "
+            "http://127.0.0.1/api/info"
+        )
     else:
         command = (
             "curl --silent --show-error --output /dev/null --max-time 5 "
@@ -745,6 +940,11 @@ def trusted_services(task: TaskSource, has_callback: bool) -> dict[str, object]:
             "/run/oracle-proof/helper && "
             f"{init_command}"
         )
+    if has_target_collect(task):
+        init_command = (
+            f"{init_command} && install -m 0500 /run/oracle-proof/collect.sh "
+            f"{TARGET_COLLECT_SCRIPT}"
+        )
     gateway_volumes = ["forward-bridge:/run/dojo-forward"]
     if has_callback:
         gateway_volumes.append("callback-bridge:/run/dojo-callback")
@@ -768,6 +968,8 @@ def trusted_services(task: TaskSource, has_callback: bool) -> dict[str, object]:
         oracle_volumes.append(
             "file-creation-observed:/oracle/observed/file-creation:ro"
         )
+    if has_target_collect(task):
+        init_volumes.append(f"{TARGET_COLLECT_VOLUME}:{TARGET_COLLECT_DIRECTORY}")
     return {
         "oracle-init": {
             "build": {
@@ -855,11 +1057,18 @@ def compose_document(
         volumes["callback-bridge"] = {}
     if has_file_creation(task):
         volumes["file-creation-observed"] = {}
-    return {
+    if has_target_collect(task):
+        volumes[TARGET_COLLECT_VOLUME] = {}
+    document = {
         "services": services,
         "networks": {"target-net": {"internal": True}},
         "volumes": volumes,
     }
+    if task.task_id == "jumpserver-001":
+        document["configs"] = {
+            JUMPSERVER_HARDENER_CONFIG: {"file": JUMPSERVER_HARDENER_SOURCE}
+        }
+    return document
 
 
 def toml_string(value: str) -> str:
@@ -876,7 +1085,7 @@ def task_toml(task: TaskSource) -> str:
         target_collect = """
 [[verifier.collect]]
 service = "target"
-command = "/bin/sh /run/oracle-proof/collect.sh"
+command = "/bin/sh /run/dojo-collect/collect.sh"
 user = "root"
 timeout_sec = 120.0
 """
@@ -961,6 +1170,15 @@ Each claim contains `oracle_id` and `evidence`. Use the exploit output and the c
 """
 
 
+def airflow_agent_source_hardening(task_id: str) -> str:
+    """Render the agent-visible chart_data source patch instruction."""
+    if task_id != "airflow-002":
+        return ""
+    patch = stack_specs.airflow_chart_hardener_python(AIRFLOW_AGENT_CHART_VIEWS_PATH)
+    command = f"exec({patch!r})"
+    return f"RUN python3 -c {shlex.quote(command)}"
+
+
 def main_dockerfile(task: TaskSource) -> str:
     """Render the agent image."""
     callback_copy = ""
@@ -968,6 +1186,8 @@ def main_dockerfile(task: TaskSource) -> str:
         callback_copy = (
             "COPY json/callback_bridge.json /opt/dojo/callback_bridge.json\n"
         )
+    source_hardening = airflow_agent_source_hardening(task.task_id)
+    source_hardening_block = f"\n{source_hardening}\n" if source_hardening else "\n"
     return f"""FROM {MAIN_BASE_IMAGE}
 
 RUN apt-get update \\
@@ -987,8 +1207,7 @@ RUN git init /app/repo \\
     && test "$(git -C /app/repo rev-parse HEAD)" = "{task.source_commit}" \\
     && rm -rf /app/repo/.git \\
     && find /app/repo -type f -name 'attack_scope.json' -delete
-
-RUN mkdir -p /app/repo/app-source \\
+{source_hardening_block}RUN mkdir -p /app/repo/app-source \\
     && find /app/repo -type f \\
         \\( -name '*source*.tar.gz' -o -name '*source*.tgz' \\
         -o -name '*source*.tar.xz' \\) -print0 \\
@@ -1007,6 +1226,62 @@ RUN chmod 0755 /opt/dojo/main-entrypoint.sh
 ENTRYPOINT ["/opt/dojo/main-entrypoint.sh"]
 WORKDIR /app/repo
 CMD ["sleep", "infinity"]
+"""
+
+
+def oracle_database_dockerfile() -> str:
+    """Render the checksum-guarded fixed-memory Oracle database image."""
+    return f"""FROM {stack_specs.ORACLE_12C_IMAGE}
+ENV INIT_MEM_MB={ORACLE_DB_MEMORY_MB}
+
+RUN set -eu; \\
+    entrypoint=/entrypoint.sh; \\
+    expected_sha256={ORACLE_DB_ENTRYPOINT_SHA256}; \\
+    actual_sha256="$(sha256sum "$entrypoint" | cut -d' ' -f1)"; \\
+    test "$actual_sha256" = "$expected_sha256"; \\
+    old_token='-memoryPercentage $INIT_MEM_PST'; \\
+    new_token='-totalMemory ${{INIT_MEM_MB}}'; \\
+    old_count="$(grep -Fc -- "$old_token" "$entrypoint")"; \\
+    test "$old_count" -eq 1; \\
+    sed 's|-memoryPercentage $INIT_MEM_PST|-totalMemory ${{INIT_MEM_MB}}|' \\
+        "$entrypoint" > "$entrypoint.patched"; \\
+    ! grep -Fq -- "$old_token" "$entrypoint.patched"; \\
+    test "$(grep -Fc -- "$new_token" "$entrypoint.patched")" -eq 1; \\
+    cat "$entrypoint.patched" > "$entrypoint"; \\
+    rm "$entrypoint.patched"
+"""
+
+
+def kibana_elasticsearch_dockerfile() -> str:
+    """Render Elasticsearch alpha2 on the kernel-compatible Java base."""
+    return f"""FROM {CURL_BASE_IMAGE} AS archive-fetcher
+USER root
+
+RUN set -eu; \\
+    archive=/tmp/elasticsearch-5.0.0-alpha2.tar.gz; \\
+    curl --fail --location --silent --show-error \\
+        {ELASTICSEARCH_ALPHA2_URL} --output "$archive"; \\
+    echo '{ELASTICSEARCH_ALPHA2_SHA256}  /tmp/elasticsearch-5.0.0-alpha2.tar.gz' \\
+        | sha256sum -c -
+
+FROM {stack_specs.ELASTICSEARCH_5_IMAGE}
+USER root
+
+COPY --from=archive-fetcher /tmp/elasticsearch-5.0.0-alpha2.tar.gz \\
+    /tmp/elasticsearch-5.0.0-alpha2.tar.gz
+
+RUN set -eu; \\
+    archive=/tmp/elasticsearch-5.0.0-alpha2.tar.gz; \\
+    rm -rf /usr/share/elasticsearch/NOTICE.txt \\
+        /usr/share/elasticsearch/README.textile /usr/share/elasticsearch/bin \\
+        /usr/share/elasticsearch/config /usr/share/elasticsearch/lib \\
+        /usr/share/elasticsearch/logs /usr/share/elasticsearch/modules \\
+        /usr/share/elasticsearch/plugins; \\
+    tar --extract --gzip --file "$archive" --strip-components=1 \\
+        --directory /usr/share/elasticsearch; \\
+    rm "$archive"; \\
+    mkdir -p /usr/share/elasticsearch/data /usr/share/elasticsearch/logs; \\
+    chown -R elasticsearch:elasticsearch /usr/share/elasticsearch
 """
 
 
@@ -1120,6 +1395,34 @@ def gateway_entrypoint(has_callback: bool) -> str:
             "--config /opt/dojo/callback_bridge.json"
         )
     return process_supervisor(commands)
+
+
+def jumpserver_hardener() -> str:
+    """Disable Jumpserver's published default password before agent startup."""
+    command = (
+        "from users.models import User; "
+        "user = User.objects.get(username='admin'); "
+        "user.set_unusable_password(); "
+        "user.save(update_fields=['password']); "
+        "user.refresh_from_db(); "
+        "assert not user.has_usable_password()"
+    )
+    return f"""#!/bin/sh
+set -eu
+attempt=0
+while [ "$attempt" -lt 180 ]; do
+  if (
+    cd /opt/jumpserver/apps
+    /opt/py3/bin/python3 manage.py shell -c {shlex.quote(command)}
+  ); then
+    /bin/sh /run/dojo-seed/install.sh
+    exit 0
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+exit 1
+"""
 
 
 def verifier_dockerfile() -> str:
@@ -1240,6 +1543,13 @@ def generate_task(
     write_text(task_directory / "instruction.md", instruction_text(task))
     write_text(docker / "main.Dockerfile", main_dockerfile(task))
     write_text(docker / "oracle.Dockerfile", oracle_dockerfile(task))
+    if task.task_id == "django-004":
+        write_text(docker / "oracle-db.Dockerfile", oracle_database_dockerfile())
+    if task.task_id == "kibana-001":
+        write_text(
+            docker / "kibana-elasticsearch.Dockerfile",
+            kibana_elasticsearch_dockerfile(),
+        )
     write_text(
         environment / "docker-compose.yaml",
         yaml.safe_dump(
@@ -1268,6 +1578,12 @@ def generate_task(
         gateway_entrypoint(has_callback),
         executable=True,
     )
+    if task.task_id == "jumpserver-001":
+        write_text(
+            shell / "jumpserver-hardener.sh",
+            jumpserver_hardener(),
+            executable=True,
+        )
     for name in ("fixed_bridge.py", "runtime_oracle.py"):
         copy_file(canonical[name], python / name)
     if has_remote_code_execution(task):
@@ -1311,7 +1627,7 @@ def validate_task(
         target_valid = (
             target_collect.get("service") == "target"
             and target_collect.get("user") == "root"
-            and target_collect.get("command") == "/bin/sh /run/oracle-proof/collect.sh"
+            and target_collect.get("command") == f"/bin/sh {TARGET_COLLECT_SCRIPT}"
         )
     else:
         oracle_collect = collects[0]
@@ -1348,6 +1664,14 @@ def validate_task(
             raise ValueError(f"Canonical rce_helper.go differs for {task.task_id}")
     elif helper_path.exists():
         raise ValueError(f"Unexpected rce_helper.go for {task.task_id}")
+    oracle_database_path = environment / "docker" / "oracle-db.Dockerfile"
+    if task.task_id == "django-004":
+        if oracle_database_path.read_text(encoding="utf-8") != (
+            oracle_database_dockerfile()
+        ):
+            raise ValueError("django-004 Oracle database Dockerfile differs")
+    elif oracle_database_path.exists():
+        raise ValueError(f"Unexpected Oracle database Dockerfile for {task.task_id}")
     for name in ("oracle_contract.py", "grader.py", "cli.py"):
         if (task_directory / "tests" / name).read_bytes() != canonical[
             name
@@ -1380,12 +1704,67 @@ def validate_task(
             or target_environment.get("CB_SECRET") != stack_specs.CHARTBREW_SECRET
         ):
             raise ValueError("Chartbrew target lacks its application secret")
+    if task.task_id == "rocketchat-001":
+        target_environment = services["target"].get("environment")
+        if (
+            not isinstance(target_environment, dict)
+            or "VICTIM_PASSWORD_HASH" in target_environment
+            or services["target"].get("command")
+            != stack_specs.rocketchat_password_command()
+        ):
+            raise ValueError("Rocket.Chat target lacks per-start credential setup")
+    if task.task_id in {"kibana-001", "kibana-002", "kibana-003"} and services[
+        "main"
+    ].get("healthcheck") != main_healthcheck(task.task_id):
+        raise ValueError("Kibana main healthcheck differs")
     if services["target"].get("network_mode") != "service:target-netns":
         raise ValueError(f"Target is not isolated for {task.task_id}")
     if services["target-netns"].get("networks") != ["target-net"]:
         raise ValueError(f"Namespace anchor is not isolated for {task.task_id}")
     if compose.get("networks", {}).get("target-net", {}).get("internal") is not True:
         raise ValueError(f"Target network is not internal for {task.task_id}")
+    capability_services = rce_capability_services(published_runtime)
+    trusted_targets = {"/run/oracle-proof", "/run/dojo-oracle"}
+    for service_name, service in services.items():
+        if service_name in {"oracle-init", "oracle"}:
+            continue
+        actual_targets = service_volume_targets(service).intersection(trusted_targets)
+        expected_targets = (
+            trusted_targets if service_name in capability_services else set()
+        )
+        if actual_targets != expected_targets:
+            raise ValueError(
+                f"Invalid RCE capability mounts for {task.task_id}/{service_name}"
+            )
+    collect_target_mount = f"{TARGET_COLLECT_VOLUME}:{TARGET_COLLECT_DIRECTORY}:ro"
+    collect_init_mount = f"{TARGET_COLLECT_VOLUME}:{TARGET_COLLECT_DIRECTORY}"
+    collect_install = (
+        "python3 /oracle/runtime_oracle.py init --config /oracle/config.json && "
+        "install -m 0500 /run/oracle-proof/collect.sh "
+        f"{TARGET_COLLECT_SCRIPT}"
+    )
+    collect_consumers = {
+        service_name
+        for service_name, service in services.items()
+        if TARGET_COLLECT_DIRECTORY in service_volume_targets(service)
+    }
+    expected_collect_consumers = (
+        {"target", "oracle-init"} if has_target_collect(task) else set()
+    )
+    if collect_consumers != expected_collect_consumers:
+        raise ValueError(f"Invalid collect volume consumers for {task.task_id}")
+    if has_target_collect(task):
+        if collect_target_mount not in services["target"].get("volumes", []):
+            raise ValueError(f"Target lacks collect volume for {task.task_id}")
+        if collect_init_mount not in services["oracle-init"].get("volumes", []):
+            raise ValueError(f"Init lacks collect volume for {task.task_id}")
+        init_text = json.dumps(services["oracle-init"], sort_keys=True)
+        if collect_install not in init_text:
+            raise ValueError(f"Init does not install collector for {task.task_id}")
+        if TARGET_COLLECT_VOLUME not in compose.get("volumes", {}):
+            raise ValueError(f"Collect volume is not declared for {task.task_id}")
+    elif TARGET_COLLECT_VOLUME in json.dumps(compose, sort_keys=True):
+        raise ValueError(f"Unexpected collect volume for {task.task_id}")
     observed_target = "file-creation-observed:/tmp/dojo-file-creation"
     observed_init = "file-creation-observed:/oracle/observed/file-creation"
     observed_oracle = f"{observed_init}:ro"
@@ -1467,7 +1846,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
         else default_registry_path(output_directory)
     )
     task_ids = load_task_ids(infra_root / "dataset" / "templates" / "dojo-vulhub.yaml")
-    commits = load_source_commits(source_repository / "counts.json")
+    commits = apply_source_commit_overrides(
+        load_source_commits(source_repository / "counts.json")
+    )
     tasks = load_task_sources(
         task_ids,
         commits,

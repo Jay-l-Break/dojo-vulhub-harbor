@@ -41,8 +41,6 @@ services:
       DJANGO_SECRET_KEY: ''
     network_mode: service:target-netns
     volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     - oracle-seed:/run/dojo-seed
     post_start:
     - command: /bin/sh /run/dojo-seed/install.sh
@@ -62,9 +60,6 @@ services:
       POSTGRES_PASSWORD: local-compose-django-001-db
       POSTGRES_DB: xss
     network_mode: service:target-netns
-    volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     depends_on:
       target-netns:
         condition: service_started
@@ -84,9 +79,6 @@ services:
 
         '
     network_mode: service:target-netns
-    volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     depends_on:
       target-netns:
         condition: service_started

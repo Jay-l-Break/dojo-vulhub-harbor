@@ -67,6 +67,31 @@ class OracleSpecsTest(unittest.TestCase):
         self.assertNotIn("private", repr(config))
         self.assertEqual("/run/task/flag", config["file_seeds"][0]["path"])
 
+    def test_multiservice_rce_targets_match_execution_provenance(self) -> None:
+        expected = {
+            "airflow-002": "target",
+            "chartbrew-001": "target",
+            "kibana-001": "target",
+            "kibana-002": "backend",
+            "kibana-003": "backend",
+            "mongo-express-001": "target",
+            "node-002": "target",
+            "pgadmin-003": "target",
+            "pgadmin-004": "target",
+        }
+        manifest = {"remote_code_execution": "vuln-01-rce.py"}
+        for task_id, target_service in expected.items():
+            with self.subTest(task_id=task_id):
+                config = oracle_specs.build_runtime_config(task_id, manifest, {})
+                self.assertEqual(
+                    config["trigger_checks"][0]["target_service"],
+                    target_service,
+                )
+        self.assertEqual(
+            oracle_specs.RCE_TARGET_SERVICE_OVERRIDES,
+            {"kibana-002": "backend", "kibana-003": "backend"},
+        )
+
     def test_database_uses_password_environment(self) -> None:
         manifest = {"unauthorized_database_read": "vuln-01-read.py"}
         flags = {

@@ -28,7 +28,7 @@ environment_mode = "separate"
 
 [[verifier.collect]]
 service = "target"
-command = "/bin/sh /run/oracle-proof/collect.sh"
+command = "/bin/sh /run/dojo-collect/collect.sh"
 user = "root"
 timeout_sec = 120.0
 

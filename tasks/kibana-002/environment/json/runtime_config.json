@@ -37,7 +37,7 @@
       "listen_host": "127.0.0.1",
       "listen_port": 4444,
       "oracle_id": "kibana-002:vuln-01:rce",
-      "target_service": "target"
+      "target_service": "backend"
     }
   ]
 }

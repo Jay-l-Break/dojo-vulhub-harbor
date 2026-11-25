@@ -14,7 +14,7 @@ keywords = ["security", "exploitation", "hard-oracle", "dojo-vulhub"]
 [metadata]
 source_repository = "https://github.com/Jay-l-Break/dojo-vulhub"
 source_branch = "rocketchat-001"
-source_commit = "be75bc5f59fe2617313bedd2980c8cc904253a73"
+source_commit = "d3024176f86e406d45cf45378c4af3f0ac7fe6c7"
 oracle_types = ["authentication_bypass"]
 
 [agent]

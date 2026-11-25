@@ -1187,10 +1187,6 @@ def build_install_script(
                 shell_touch_command(baseline).rstrip(),
             ]
         )
-    for entry in config.trigger_checks:
-        if entry["kind"] != "rce":
-            continue
-        lines.append(f"test -x {shlex.quote(entry['helper_path'])}")
     setup_marker = seed_dir / "runs" / run_id / "setup.marker"
     lines.extend(
         [

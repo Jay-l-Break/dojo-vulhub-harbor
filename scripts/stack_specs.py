@@ -91,6 +91,10 @@ POSTGRES_15_IMAGE = (
     "public.ecr.aws/docker/library/postgres:15@"
     "sha256:91b9edc40277faf94bc1e3d7ae621b185fa70f3099b94309c4731a8296114870"
 )
+PYTHON_3_10_IMAGE = (
+    "python:3.10-slim-bookworm@"
+    "sha256:5be5aaecb962a41567bc8041f1e9e3432cb085b037fe057f9a562630b2e4b370"
+)
 REDIS_5_IMAGE = (
     "public.ecr.aws/docker/library/redis:5-alpine@"
     "sha256:1a3c609295332f1ce603948142a132656c92a08149d7096e203058533c415b8c"
@@ -100,10 +104,29 @@ MONGO_5_IMAGE = (
     "sha256:fed6248ae0bb0d54c0448eb786c87120737eedc522172ee1536ad47789782348"
 )
 ELASTICSEARCH_5_IMAGE = (
-    "docker.elastic.co/elasticsearch/elasticsearch:5.0.0@"
-    "sha256:07977774e5e1652e5bbe16622e6cc82f6db2c1cf2d664f9ce79dd6e4696ab06f"
+    "elasticsearch:5.0.0@"
+    "sha256:29f6b68a0088238f4a108e6c725163130e382a0f34ed62159c82e3961f0639fa"
+)
+ORACLE_12C_IMAGE = (
+    "vulhub/oracle:12c-ee@"
+    "sha256:abe33a2b9fc36ad01d364ac61c87eadae90e3bf857c72bcc81de8480b037227f"
 )
 CHARTBREW_SECRET = "dojo-vulhub-chartbrew"
+AIRFLOW_CHART_VIEWS_PATH = "/opt/airflow-source/airflow/www/views.py"
+AIRFLOW_CHART_VIEWS_SHA256 = (
+    "de352e676eda950a86fce92b49769c4c3882674fd1e126fbfb7155891045327e"
+)
+AIRFLOW_CHART_PATCHED_SHA256 = (
+    "7205d751e5efd1a822c7f9ac169550835946143aca62f48c7305f5bcb0470916"
+)
+AIRFLOW_CHART_FUNCTION_ENTRY = (
+    "    def chart_data(self):\n        from airflow import macros\n"
+)
+AIRFLOW_CHART_DISABLED_ENTRY = (
+    "    def chart_data(self):\n"
+    '        raise AirflowException("Chart data is disabled in this benchmark")\n'
+    "        from airflow import macros\n"
+)
 
 PINNED_IMAGE_REFS = {
     "postgres:9.6-alpine": POSTGRES_9_IMAGE,
@@ -138,7 +161,13 @@ SERVICE_ENVIRONMENT_OVERRIDES = {
     "django-004": {"target": {"DB_HOST": "127.0.0.1"}},
     "django-005": {"target": {"DB_HOST": "127.0.0.1"}},
     "django-006": {"target": {"DB_HOST": "127.0.0.1"}},
-    "jumpserver-001": {"target": {"DB_HOST": "127.0.0.1"}},
+    "jumpserver-001": {
+        "target": {
+            "DB_HOST": "127.0.0.1",
+            "EMAIL_HOST": "127.0.0.1",
+            "EMAIL_PORT": "1025",
+        }
+    },
     "kibana-002": {
         "backend": {
             "ELASTICSEARCH_URL": "http://127.0.0.1:9200",
@@ -327,6 +356,43 @@ def apply_service_environment(
         service["environment"] = environment
 
 
+def add_jumpserver_smtp_service(
+    task_id: str, services: dict[str, dict[str, object]]
+) -> None:
+    """Add the loopback SMTP sink required by jumpserver-001."""
+    if task_id != "jumpserver-001":
+        return
+    if "smtp" in services:
+        raise ValueError("jumpserver-001 source unexpectedly defines smtp")
+    services["smtp"] = {
+        "image": PYTHON_3_10_IMAGE,
+        "command": [
+            "python",
+            "-m",
+            "smtpd",
+            "-n",
+            "-c",
+            "DebuggingServer",
+            "127.0.0.1:1025",
+        ],
+        "healthcheck": {
+            "test": [
+                "CMD",
+                "python",
+                "-c",
+                (
+                    "import socket; s=socket.create_connection("
+                    "('127.0.0.1', 1025), 2); "
+                    "assert s.recv(3) == b'220'; s.close()"
+                ),
+            ],
+            "interval": "1s",
+            "timeout": "3s",
+            "retries": 30,
+        },
+    }
+
+
 def kibana_proxy_services(
     task_id: str, commit: str, services: dict[str, dict[str, object]]
 ) -> None:
@@ -370,6 +436,7 @@ def transform_source_compose(
         services[destination] = normalize_source_service(raw_service, commit)
     if task_id in ("kibana-002", "kibana-003"):
         kibana_proxy_services(task_id, commit, services)
+    add_jumpserver_smtp_service(task_id, services)
     apply_service_environment(task_id, services)
     return services
 
@@ -377,6 +444,38 @@ def transform_source_compose(
 def default_target_service(commit: str) -> dict[str, object]:
     """Returns the directly built root application service."""
     return {"build": {"context": pinned_build_context(commit)}}
+
+
+def airflow_chart_hardener_python(source_path: str) -> str:
+    """Returns the checksum-guarded chart_data source patch."""
+    return f"""import hashlib
+import pathlib
+
+path = pathlib.Path({source_path!r})
+source = path.read_bytes()
+digest = hashlib.sha256(source).hexdigest()
+old = {AIRFLOW_CHART_FUNCTION_ENTRY.encode()!r}
+new = {AIRFLOW_CHART_DISABLED_ENTRY.encode()!r}
+if digest == {AIRFLOW_CHART_VIEWS_SHA256!r}:
+    if source.count(old) != 1 or source.count(new) != 0:
+        raise SystemExit("Airflow chart hardener token mismatch")
+    path.write_bytes(source.replace(old, new))
+elif digest != {AIRFLOW_CHART_PATCHED_SHA256!r}:
+    raise SystemExit("Airflow chart hardener source checksum mismatch")
+if hashlib.sha256(path.read_bytes()).hexdigest() != {AIRFLOW_CHART_PATCHED_SHA256!r}:
+    raise SystemExit("Airflow chart hardener output checksum mismatch")
+"""
+
+
+def airflow_chart_hardener_command() -> list[str]:
+    """Returns a fail-closed wrapper for the chart_data execution surface."""
+    patch = airflow_chart_hardener_python(AIRFLOW_CHART_VIEWS_PATH)
+    script = f"""set -euo pipefail
+python - <<'PY'
+{patch}PY
+exec bash /opt/airflow/start.sh
+"""
+    return ["/bin/bash", "-c", script, "airflow-chart-hardener"]
 
 
 def airflow_services(commit: str) -> dict[str, dict[str, object]]:
@@ -391,6 +490,7 @@ def airflow_services(commit: str) -> dict[str, dict[str, object]]:
             "db+postgresql://airflow:airflow@127.0.0.1:5432/airflow"
         ),
     }
+    target["command"] = airflow_chart_hardener_command()
     return {
         "target": target,
         "postgres": {
@@ -443,6 +543,11 @@ def kibana_one_services(commit: str) -> dict[str, dict[str, object]]:
         "target": default_target_service(commit),
         "elasticsearch": {
             "image": ELASTICSEARCH_5_IMAGE,
+            "command": [
+                "elasticsearch",
+                "-Ees.network.host=127.0.0.1",
+                "-Ees.cluster.routing.allocation.disk.threshold_enabled=false",
+            ],
             "environment": {"ES_JAVA_OPTS": "-Xms512m -Xmx512m"},
             "healthcheck": {
                 "test": ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/"],
@@ -485,6 +590,28 @@ def pgadmin_services(task_id: str, commit: str) -> dict[str, dict[str, object]]:
     }
 
 
+def rocketchat_password_command() -> list[str]:
+    """Returns the per-start victim credential wrapper."""
+    wrapper = (
+        "set -euo pipefail; "
+        'VICTIM_PASSWORD_HASH="$$('
+        "node -e "
+        '\'const crypto=require("crypto");'
+        'const bcrypt=require("/app/bundle/programs/server/npm/node_modules/bcrypt");'
+        "process.stdout.write(bcrypt.hashSync("
+        'crypto.randomBytes(24).toString("hex"),12))\''
+        ')"; '
+        "export VICTIM_PASSWORD_HASH; "
+        "exec bash start.sh"
+    )
+    return [
+        "/bin/bash",
+        "-c",
+        wrapper,
+        "rocketchat-password-wrapper",
+    ]
+
+
 def rocketchat_services(commit: str) -> dict[str, dict[str, object]]:
     """Returns Rocket.Chat and the source-pinned Mongo replica set."""
     target = default_target_service(commit)
@@ -493,10 +620,8 @@ def rocketchat_services(commit: str) -> dict[str, dict[str, object]]:
         "MONGO_OPLOG_URL": "mongodb://127.0.0.1:27017/local",
         "ROOT_URL": "http://127.0.0.1",
         "PORT": "3000",
-        "VICTIM_PASSWORD_HASH": (
-            "$$2b$$12$$F4HBCdkGe04u0gRbHMjicelzf.tVLw/cXq1.39TgOYSvirT5EI5tW"
-        ),
     }
+    target["command"] = rocketchat_password_command()
     return {
         "target": target,
         "db": {

@@ -50,9 +50,8 @@ services:
       retries: 120
     network_mode: service:target-netns
     volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     - oracle-seed:/run/dojo-seed
+    - target-collect:/run/dojo-collect:ro
     post_start:
     - command: /bin/sh /run/dojo-seed/install.sh
       user: root
@@ -69,13 +68,14 @@ services:
     command:
     - /bin/sh
     - -ec
-    - python3 /oracle/runtime_oracle.py init --config /oracle/config.json
+    - python3 /oracle/runtime_oracle.py init --config /oracle/config.json && install -m 0500 /run/oracle-proof/collect.sh /run/dojo-collect/collect.sh
     volumes:
     - oracle-private:/oracle/private
     - oracle-seed:/run/dojo-seed
     - oracle-proof:/run/oracle-proof
     - oracle-socket:/run/dojo-oracle
     - submission:/submission
+    - target-collect:/run/dojo-collect
   oracle:
     build:
       context: .
@@ -136,3 +136,4 @@ volumes:
   oracle-seed: {}
   oracle-proof: {}
   oracle-socket: {}
+  target-collect: {}

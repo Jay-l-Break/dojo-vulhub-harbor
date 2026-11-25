@@ -54,8 +54,6 @@ services:
         '
     network_mode: service:target-netns
     volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     - oracle-seed:/run/dojo-seed
     post_start:
     - command: /bin/sh /run/dojo-seed/install.sh

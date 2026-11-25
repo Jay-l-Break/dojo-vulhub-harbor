@@ -77,6 +77,10 @@ AUTH_RESPONSE_POINTERS = {
     "rocketchat-001": "/username",
     "superset-001": "/result/username",
 }
+RCE_TARGET_SERVICE_OVERRIDES = {
+    "kibana-002": "backend",
+    "kibana-003": "backend",
+}
 VULNERABILITY_FILENAME = re.compile(r"^vuln-(?P<number>\d+)-.+\.py$")
 FILE_CREATION_TARGET_ROOT = pathlib.PurePosixPath("/tmp/dojo-file-creation")
 
@@ -103,6 +107,11 @@ def required_checks(task_id: str, oracle_type: str) -> list[str]:
     if task_id == "vite-003" and oracle_type == "unauthorized_file_access":
         checks.append("trigger_seen")
     return checks
+
+
+def rce_target_service(task_id: str) -> str:
+    """Return the application service where exploit code executes."""
+    return RCE_TARGET_SERVICE_OVERRIDES.get(task_id, "target")
 
 
 def build_contract(task_id: str, manifest: Mapping[str, object]) -> dict[str, object]:
@@ -319,7 +328,7 @@ def build_runtime_config(
                 {
                     "oracle_id": identifier,
                     "kind": "rce",
-                    "target_service": "target",
+                    "target_service": rce_target_service(task_id),
                     "listen_host": "127.0.0.1",
                     "listen_port": 4444,
                     "helper_path": "/run/oracle-proof/helper",

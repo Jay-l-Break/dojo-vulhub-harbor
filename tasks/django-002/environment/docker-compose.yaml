@@ -35,8 +35,6 @@ services:
       context: https://github.com/Jay-l-Break/dojo-vulhub.git#4548e9ddf7cec911afff42df58943ee83345aec2
     network_mode: service:target-netns
     volumes:
-    - oracle-proof:/run/oracle-proof:ro
-    - oracle-socket:/run/dojo-oracle:ro
     - oracle-seed:/run/dojo-seed
     post_start:
     - command: /bin/sh /run/dojo-seed/install.sh
