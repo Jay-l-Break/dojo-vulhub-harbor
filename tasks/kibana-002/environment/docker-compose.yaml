@@ -1,0 +1,162 @@
+services:
+  main:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      REMOTE_TARGET_URL: http://127.0.0.1
+    volumes:
+    - submission:/submission
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      gateway:
+        condition: service_started
+      oracle:
+        condition: service_healthy
+      target:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl --silent --show-error --output /dev/null --max-time 5 http://127.0.0.1
+      interval: 5s
+      timeout: 6s
+      start_period: 10s
+      retries: 240
+  target-netns:
+    image: debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+    command:
+    - sleep
+    - infinity
+    networks:
+    - target-net
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:6.5.0@sha256:e0823ade6ccdc1275335c9f0a3721111abd01c964de577d648dc357bb8b858d1
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: 'false'
+      node.store.allow_mmapfs: 'false'
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl -fsS http://localhost:9200/ >/dev/null
+      interval: 2s
+      retries: 40
+    network_mode: service:target-netns
+    volumes:
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle:ro
+    depends_on:
+      target-netns:
+        condition: service_started
+  backend:
+    build:
+      context: https://github.com/Jay-l-Break/dojo-vulhub.git#22f3d633a7ac19b4d7927abafdc45352f3744367
+    environment:
+      ELASTICSEARCH_URL: http://127.0.0.1:9200
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: '5601'
+    network_mode: service:target-netns
+    volumes:
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle:ro
+    depends_on:
+      target-netns:
+        condition: service_started
+  target:
+    build:
+      context: https://github.com/Jay-l-Break/dojo-vulhub.git#22f3d633a7ac19b4d7927abafdc45352f3744367
+      dockerfile: deployment/nginx.Dockerfile
+    network_mode: service:target-netns
+    volumes:
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle:ro
+    - oracle-seed:/run/dojo-seed
+    post_start:
+    - command: /bin/sh /run/dojo-seed/install.sh
+      user: root
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target-netns:
+        condition: service_started
+      elasticsearch:
+        condition: service_healthy
+      backend:
+        condition: service_started
+  oracle-init:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: none
+    command:
+    - /bin/sh
+    - -ec
+    - install -m 0755 /usr/local/bin/dojo-rce-helper /run/oracle-proof/helper && python3 /oracle/runtime_oracle.py init --config /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission
+  oracle:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    environment: {}
+    command:
+    - python3
+    - /oracle/runtime_oracle.py
+    - serve
+    - --config
+    - /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission:ro
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target:
+        condition: service_started
+      target-netns:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - /oracle/runtime_oracle.py
+      - health
+      - --config
+      - /oracle/config.json
+      interval: 2s
+      timeout: 5s
+      retries: 180
+  gateway:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    command:
+    - /opt/dojo/gateway-entrypoint.sh
+    volumes:
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      target:
+        condition: service_started
+      target-netns:
+        condition: service_started
+networks:
+  target-net:
+    internal: true
+volumes:
+  submission: {}
+  forward-bridge: {}
+  oracle-private: {}
+  oracle-seed: {}
+  oracle-proof: {}
+  oracle-socket: {}

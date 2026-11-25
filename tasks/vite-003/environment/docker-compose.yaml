@@ -1,0 +1,138 @@
+services:
+  main:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      REMOTE_TARGET_URL: http://127.0.0.1
+    volumes:
+    - submission:/submission
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      gateway:
+        condition: service_started
+      oracle:
+        condition: service_healthy
+      target:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl --silent --show-error --output /dev/null --max-time 5 http://127.0.0.1
+      interval: 5s
+      timeout: 6s
+      start_period: 10s
+      retries: 240
+  target-netns:
+    image: debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+    command:
+    - sleep
+    - infinity
+    networks:
+    - target-net
+  target:
+    build:
+      context: https://github.com/Jay-l-Break/dojo-vulhub.git#4ccc4cc77e48e61d9479971fb39a71d744b9a17d
+    command:
+    - /bin/sh
+    - -c
+    - npm run dev -- --host 0.0.0.0 --port 5173 & exec node -e "$1"
+    - vite-proxy
+    - const http=require('node:http');const fs=require('node:fs');const intended='/@fs/app/#/../../../tmp/vite003-secret';const marker='/tmp/vite003-intended-trigger';try{fs.unlinkSync(marker)}catch(error){if(error.code!=='ENOENT')throw error}http.createServer((request,response)=>{const upstream=http.request({hostname:'127.0.0.1',port:5173,path:request.url,method:request.method,headers:{...request.headers,host:'127.0.0.1:5173'}},upstreamResponse=>{if(request.url===intended){const chunks=[];upstreamResponse.on('data',chunk=>chunks.push(chunk));upstreamResponse.on('end',()=>{const body=Buffer.concat(chunks);if(upstreamResponse.statusCode===200)fs.writeFileSync(marker,body,{mode:0o600});response.writeHead(upstreamResponse.statusCode,upstreamResponse.headers);response.end(body)})}else{response.writeHead(upstreamResponse.statusCode,upstreamResponse.headers);upstreamResponse.pipe(response)}});upstream.on('error',error=>{response.writeHead(502);response.end(error.message)});request.pipe(upstream)}).listen(80,'0.0.0.0')
+    healthcheck:
+      test:
+      - CMD
+      - node
+      - -e
+      - require('node:http').get('http://127.0.0.1:5173/',response=>{response.resume();process.exit(0)}).on('error',()=>process.exit(1))
+      interval: 1s
+      timeout: 2s
+      retries: 120
+    network_mode: service:target-netns
+    volumes:
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle:ro
+    - oracle-seed:/run/dojo-seed
+    post_start:
+    - command: /bin/sh /run/dojo-seed/install.sh
+      user: root
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target-netns:
+        condition: service_started
+  oracle-init:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: none
+    command:
+    - /bin/sh
+    - -ec
+    - install -m 0755 /usr/local/bin/dojo-rce-helper /run/oracle-proof/helper && python3 /oracle/runtime_oracle.py init --config /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission
+  oracle:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    environment: {}
+    command:
+    - python3
+    - /oracle/runtime_oracle.py
+    - serve
+    - --config
+    - /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission:ro
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target:
+        condition: service_healthy
+      target-netns:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - /oracle/runtime_oracle.py
+      - health
+      - --config
+      - /oracle/config.json
+      interval: 2s
+      timeout: 5s
+      retries: 180
+  gateway:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    command:
+    - /opt/dojo/gateway-entrypoint.sh
+    volumes:
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      target:
+        condition: service_healthy
+      target-netns:
+        condition: service_started
+networks:
+  target-net:
+    internal: true
+volumes:
+  submission: {}
+  forward-bridge: {}
+  oracle-private: {}
+  oracle-seed: {}
+  oracle-proof: {}
+  oracle-socket: {}

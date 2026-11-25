@@ -1,0 +1,4 @@
+{
+  "remote_code_execution": "vuln-01-celery-broker.py",
+  "unauthorized_file_creation": "vuln-01-celery-broker.py"
+}

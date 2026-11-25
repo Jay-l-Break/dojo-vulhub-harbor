@@ -1,0 +1,4 @@
+{
+  "unauthorized_file_access": "vuln-01-file-read.py",
+  "unauthorized_file_creation": "vuln-02-file-write.py"
+}

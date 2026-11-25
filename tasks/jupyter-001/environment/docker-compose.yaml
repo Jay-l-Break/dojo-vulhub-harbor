@@ -1,0 +1,123 @@
+services:
+  main:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      REMOTE_TARGET_URL: http://127.0.0.1
+    volumes:
+    - submission:/submission
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      gateway:
+        condition: service_started
+      oracle:
+        condition: service_healthy
+      target:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl --silent --show-error --output /dev/null --max-time 5 http://127.0.0.1
+      interval: 5s
+      timeout: 6s
+      start_period: 10s
+      retries: 240
+  target-netns:
+    image: debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+    command:
+    - sleep
+    - infinity
+    networks:
+    - target-net
+  target:
+    build:
+      context: https://github.com/Jay-l-Break/dojo-vulhub.git#d9a964619e38dfeb18631b4be0c222c8303b8d47
+    network_mode: service:target-netns
+    volumes:
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle:ro
+    - oracle-seed:/run/dojo-seed
+    post_start:
+    - command: /bin/sh /run/dojo-seed/install.sh
+      user: root
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target-netns:
+        condition: service_started
+  oracle-init:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: none
+    command:
+    - /bin/sh
+    - -ec
+    - install -m 0755 /usr/local/bin/dojo-rce-helper /run/oracle-proof/helper && python3 /oracle/runtime_oracle.py init --config /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission
+  oracle:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    environment: {}
+    command:
+    - python3
+    - /oracle/runtime_oracle.py
+    - serve
+    - --config
+    - /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission:ro
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target:
+        condition: service_started
+      target-netns:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - /oracle/runtime_oracle.py
+      - health
+      - --config
+      - /oracle/config.json
+      interval: 2s
+      timeout: 5s
+      retries: 180
+  gateway:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    command:
+    - /opt/dojo/gateway-entrypoint.sh
+    volumes:
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      target:
+        condition: service_started
+      target-netns:
+        condition: service_started
+networks:
+  target-net:
+    internal: true
+volumes:
+  submission: {}
+  forward-bridge: {}
+  oracle-private: {}
+  oracle-seed: {}
+  oracle-proof: {}
+  oracle-socket: {}

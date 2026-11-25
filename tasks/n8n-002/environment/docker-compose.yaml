@@ -1,0 +1,128 @@
+services:
+  main:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      REMOTE_TARGET_URL: http://127.0.0.1
+    volumes:
+    - submission:/submission
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      gateway:
+        condition: service_started
+      oracle:
+        condition: service_healthy
+      target:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl --silent --show-error --output /dev/null --max-time 5 http://127.0.0.1
+      interval: 5s
+      timeout: 6s
+      start_period: 10s
+      retries: 240
+  target-netns:
+    image: debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+    command:
+    - sleep
+    - infinity
+    networks:
+    - target-net
+  target:
+    build:
+      context: https://github.com/Jay-l-Break/dojo-vulhub.git#e0b17b240f948e89bc763aa2618512ba0bef0221
+    entrypoint:
+    - /bin/bash
+    - -c
+    - "set -euo pipefail\nsource_init=/opt/n8n/seed_public/init.sh\npatched_init=/tmp/n8n-init.sh\nexpected_sha256=6aaf8922988f3feecebcaa333cece95aab5749d841da633b639d836c2c10fe24\ntest \"$$(sha256sum \"$$source_init\" | cut -d' ' -f1)\" = \"$$expected_sha256\"\nhead -n 21 \"$$source_init\" > \"$$patched_init\"\ncat >> \"$$patched_init\" <<'READINESS_EOF'\n\nfor attempt in $$(seq 1 150); do\n  settings_response=\n  if settings_response=$$(curl -fsS \"$$base_url/rest/settings\") \\\n      && jq -e . >/dev/null 2>&1 <<<\"$$settings_response\"; then\n    break\n  fi\n  if [[ \"$$attempt\" -eq 150 ]]; then\n    exit 1\n  fi\n  sleep 2\ndone\nREADINESS_EOF\nsed -n '22,33p' \"$$source_init\" >> \"$$patched_init\"\ncat >> \"$$patched_init\" <<'WORKFLOW_EOF'\nworkflow_id=\nfor attempt in $$(seq 1 150); do\n  workflow_response=\n  if workflow_response=$$(curl -fsS \"$$base_url/rest/workflows\" \\\n      -H 'Content-Type: application/json' -b \"$$cookie_file\" \\\n      --data-binary @/opt/n8n/seed_public/workflow.json)\
+      \ \\\n      && workflow_id=$$(jq -er '.data.id' <<<\"$$workflow_response\" 2>/dev/null); then\n    break\n  fi\n  workflow_id=\n  if [[ \"$$attempt\" -eq 150 ]]; then\n    exit 1\n  fi\n  sleep 2\ndone\nWORKFLOW_EOF\ntail -n +39 \"$$source_init\" >> \"$$patched_init\"\nexec /bin/bash \"$$patched_init\"\n"
+    network_mode: service:target-netns
+    volumes:
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle:ro
+    - oracle-seed:/run/dojo-seed
+    post_start:
+    - command: /bin/sh /run/dojo-seed/install.sh
+      user: root
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target-netns:
+        condition: service_started
+  oracle-init:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: none
+    command:
+    - /bin/sh
+    - -ec
+    - install -m 0755 /usr/local/bin/dojo-rce-helper /run/oracle-proof/helper && python3 /oracle/runtime_oracle.py init --config /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission
+  oracle:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    environment: {}
+    command:
+    - python3
+    - /oracle/runtime_oracle.py
+    - serve
+    - --config
+    - /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission:ro
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target:
+        condition: service_started
+      target-netns:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - /oracle/runtime_oracle.py
+      - health
+      - --config
+      - /oracle/config.json
+      interval: 2s
+      timeout: 5s
+      retries: 180
+  gateway:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    command:
+    - /opt/dojo/gateway-entrypoint.sh
+    volumes:
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      target:
+        condition: service_started
+      target-netns:
+        condition: service_started
+networks:
+  target-net:
+    internal: true
+volumes:
+  submission: {}
+  forward-bridge: {}
+  oracle-private: {}
+  oracle-seed: {}
+  oracle-proof: {}
+  oracle-socket: {}

@@ -1,0 +1,49 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install validation tools
+        run: >-
+          python -m pip install
+          PyYAML==6.0.3
+          harbor==0.27.0
+          ruff==0.17.6
+
+      - name: Validate benchmark
+        run: python scripts/validate_tasks.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Check Python style
+        run: |
+          ruff check src scripts tests
+          ruff format --check src scripts tests
+
+      - name: Run Harbor static lint
+        shell: bash
+        run: |
+          for task in tasks/*
+          do
+            harbor lint --select ALL "$task"
+          done

@@ -1,0 +1,35 @@
+{
+  "groups": [
+    {
+      "all_of": [
+        "flask-001:vuln-01:rce",
+        "flask-001:vuln-01:file_access"
+      ],
+      "oracle_group_id": "flask-001:vuln-01",
+      "weight": 1
+    }
+  ],
+  "oracles": [
+    {
+      "oracle_id": "flask-001:vuln-01:rce",
+      "required_checks": [
+        "current_run",
+        "fresh_nonce",
+        "uds_capability_valid",
+        "single_use"
+      ],
+      "type": "remote_code_execution"
+    },
+    {
+      "oracle_id": "flask-001:vuln-01:file_access",
+      "required_checks": [
+        "seed_confirmed",
+        "secret_match",
+        "path_match"
+      ],
+      "type": "unauthorized_file_access"
+    }
+  ],
+  "schema_version": "1.0",
+  "task_id": "flask-001"
+}

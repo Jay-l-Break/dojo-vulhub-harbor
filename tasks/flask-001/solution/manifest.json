@@ -1,0 +1,4 @@
+{
+  "remote_code_execution": "vuln-01-rce.py",
+  "unauthorized_file_access": "vuln-01-file-access.py"
+}

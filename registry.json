@@ -1,0 +1,226 @@
+[
+  {
+    "description": "Local exploitation benchmark for 54 pinned Dojo Vulhub targets.",
+    "metrics": [],
+    "name": "dojo-vulhub",
+    "tasks": [
+      {
+        "name": "aiohttp-001",
+        "path": "tasks/aiohttp-001"
+      },
+      {
+        "name": "airflow-001",
+        "path": "tasks/airflow-001"
+      },
+      {
+        "name": "airflow-002",
+        "path": "tasks/airflow-002"
+      },
+      {
+        "name": "airflow-003",
+        "path": "tasks/airflow-003"
+      },
+      {
+        "name": "budibase-001",
+        "path": "tasks/budibase-001"
+      },
+      {
+        "name": "celery-001",
+        "path": "tasks/celery-001"
+      },
+      {
+        "name": "chartbrew-001",
+        "path": "tasks/chartbrew-001"
+      },
+      {
+        "name": "comfyui-001",
+        "path": "tasks/comfyui-001"
+      },
+      {
+        "name": "comfyui-002",
+        "path": "tasks/comfyui-002"
+      },
+      {
+        "name": "django-001",
+        "path": "tasks/django-001"
+      },
+      {
+        "name": "django-002",
+        "path": "tasks/django-002"
+      },
+      {
+        "name": "django-003",
+        "path": "tasks/django-003"
+      },
+      {
+        "name": "django-004",
+        "path": "tasks/django-004"
+      },
+      {
+        "name": "django-005",
+        "path": "tasks/django-005"
+      },
+      {
+        "name": "django-006",
+        "path": "tasks/django-006"
+      },
+      {
+        "name": "electron-002",
+        "path": "tasks/electron-002"
+      },
+      {
+        "name": "flask-001",
+        "path": "tasks/flask-001"
+      },
+      {
+        "name": "gradio-001",
+        "path": "tasks/gradio-001"
+      },
+      {
+        "name": "gradio-002",
+        "path": "tasks/gradio-002"
+      },
+      {
+        "name": "jumpserver-001",
+        "path": "tasks/jumpserver-001"
+      },
+      {
+        "name": "jupyter-001",
+        "path": "tasks/jupyter-001"
+      },
+      {
+        "name": "kibana-001",
+        "path": "tasks/kibana-001"
+      },
+      {
+        "name": "kibana-002",
+        "path": "tasks/kibana-002"
+      },
+      {
+        "name": "kibana-003",
+        "path": "tasks/kibana-003"
+      },
+      {
+        "name": "langflow-001",
+        "path": "tasks/langflow-001"
+      },
+      {
+        "name": "langflow-002",
+        "path": "tasks/langflow-002"
+      },
+      {
+        "name": "mongo-express-001",
+        "path": "tasks/mongo-express-001"
+      },
+      {
+        "name": "n8n-001",
+        "path": "tasks/n8n-001"
+      },
+      {
+        "name": "n8n-002",
+        "path": "tasks/n8n-002"
+      },
+      {
+        "name": "next-js-001",
+        "path": "tasks/next-js-001"
+      },
+      {
+        "name": "node-001",
+        "path": "tasks/node-001"
+      },
+      {
+        "name": "node-002",
+        "path": "tasks/node-002"
+      },
+      {
+        "name": "openclaw-001",
+        "path": "tasks/openclaw-001"
+      },
+      {
+        "name": "pdfjs-001",
+        "path": "tasks/pdfjs-001"
+      },
+      {
+        "name": "pgadmin-001",
+        "path": "tasks/pgadmin-001"
+      },
+      {
+        "name": "pgadmin-002",
+        "path": "tasks/pgadmin-002"
+      },
+      {
+        "name": "pgadmin-003",
+        "path": "tasks/pgadmin-003"
+      },
+      {
+        "name": "pgadmin-004",
+        "path": "tasks/pgadmin-004"
+      },
+      {
+        "name": "pickle-001",
+        "path": "tasks/pickle-001"
+      },
+      {
+        "name": "react-001",
+        "path": "tasks/react-001"
+      },
+      {
+        "name": "rocketchat-001",
+        "path": "tasks/rocketchat-001"
+      },
+      {
+        "name": "saltstack-001",
+        "path": "tasks/saltstack-001"
+      },
+      {
+        "name": "saltstack-002",
+        "path": "tasks/saltstack-002"
+      },
+      {
+        "name": "saltstack-003",
+        "path": "tasks/saltstack-003"
+      },
+      {
+        "name": "scrapyd-001",
+        "path": "tasks/scrapyd-001"
+      },
+      {
+        "name": "superset-001",
+        "path": "tasks/superset-001"
+      },
+      {
+        "name": "superset-002",
+        "path": "tasks/superset-002"
+      },
+      {
+        "name": "supervisor-001",
+        "path": "tasks/supervisor-001"
+      },
+      {
+        "name": "vite-001",
+        "path": "tasks/vite-001"
+      },
+      {
+        "name": "vite-002",
+        "path": "tasks/vite-002"
+      },
+      {
+        "name": "vite-003",
+        "path": "tasks/vite-003"
+      },
+      {
+        "name": "vite-004",
+        "path": "tasks/vite-004"
+      },
+      {
+        "name": "yapi-001",
+        "path": "tasks/yapi-001"
+      },
+      {
+        "name": "yapi-002",
+        "path": "tasks/yapi-002"
+      }
+    ],
+    "version": "1.0"
+  }
+]

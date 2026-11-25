@@ -1,0 +1,10 @@
+{
+  "forward": [],
+  "listen_host": "127.0.0.1",
+  "reverse": [
+    "40000:40000"
+  ],
+  "schema_version": "1.0",
+  "socket_dir": "/run/dojo-callback",
+  "target_host": "127.0.0.1"
+}

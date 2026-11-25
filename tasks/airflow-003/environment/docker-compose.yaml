@@ -1,0 +1,125 @@
+services:
+  main:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      REMOTE_TARGET_URL: http://127.0.0.1
+    volumes:
+    - submission:/submission
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      gateway:
+        condition: service_started
+      oracle:
+        condition: service_healthy
+      target:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - curl --silent --show-error --output /dev/null --max-time 5 http://127.0.0.1
+      interval: 5s
+      timeout: 6s
+      start_period: 10s
+      retries: 240
+  target-netns:
+    image: debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+    command:
+    - sleep
+    - infinity
+    networks:
+    - target-net
+  target:
+    build:
+      context: https://github.com/Jay-l-Break/dojo-vulhub.git#cd00dbfaeb02787f08420243d610314d9059509a
+      dockerfile_inline: "FROM vulhub/airflow:1.10.10@sha256:286bf6a8dca04a43f04fd9b5a60d72157dd142f7c9654638a59d9952b14e86c0\n\nCOPY airflow-1.8.0 /opt/airflow-source\nCOPY start.sh /opt/airflow/start.sh\nCOPY create_user.py /opt/airflow/create_user.py\n\nENV PATH=/opt/airflow-source/airflow/bin:$$PATH \\\n    PYTHONPATH=/opt/airflow-source:/opt/airflow-deps:/home/airflow/.local/lib/python3.6/site-packages \\\n    AIRFLOW__CORE__EXECUTOR=SequentialExecutor \\\n    AIRFLOW__CORE__LOAD_EXAMPLES=false \\\n    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true \\\n    AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db \\\n    AIRFLOW__WEBSERVER__AUTHENTICATE=true \\\n    AIRFLOW__WEBSERVER__AUTH_BACKEND=airflow.contrib.auth.backends.password_auth \\\n    AIRFLOW__WEBSERVER__WEB_SERVER_PORT=80 \\\n    AIRFLOW__WEBSERVER__WORKERS=2\n\nUSER root\nRUN pip install --no-deps --target /opt/airflow-deps \\\n    Flask==0.11.1 \\\n    Flask-Admin==1.4.1 \\\n    Flask-Login==0.2.11 \\\n  \
+        \  Jinja2==2.8.1 \\\n    Flask-WTF==0.12 \\\n    Flask-Cache==0.13.1 \\\n    Flask-Swagger==0.2.13 \\\n    python-nvd3==0.14.2 \\\n    python-slugify==1.2.6\n\nEXPOSE 80\nENTRYPOINT [\"/usr/bin/dumb-init\", \"--\"]\nCMD [\"bash\", \"/opt/airflow/start.sh\"]\n"
+    network_mode: service:target-netns
+    volumes:
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle:ro
+    - oracle-seed:/run/dojo-seed
+    post_start:
+    - command: /bin/sh /run/dojo-seed/install.sh
+      user: root
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target-netns:
+        condition: service_started
+  oracle-init:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: none
+    command:
+    - /bin/sh
+    - -ec
+    - install -m 0755 /usr/local/bin/dojo-rce-helper /run/oracle-proof/helper && python3 /oracle/runtime_oracle.py init --config /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission
+  oracle:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    environment: {}
+    command:
+    - python3
+    - /oracle/runtime_oracle.py
+    - serve
+    - --config
+    - /oracle/config.json
+    volumes:
+    - oracle-private:/oracle/private
+    - oracle-seed:/run/dojo-seed
+    - oracle-proof:/run/oracle-proof:ro
+    - oracle-socket:/run/dojo-oracle
+    - submission:/submission:ro
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+      target:
+        condition: service_started
+      target-netns:
+        condition: service_started
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - /oracle/runtime_oracle.py
+      - health
+      - --config
+      - /oracle/config.json
+      interval: 2s
+      timeout: 5s
+      retries: 180
+  gateway:
+    build:
+      context: .
+      dockerfile: Oracle.Dockerfile
+    network_mode: service:target-netns
+    command:
+    - /opt/dojo/gateway-entrypoint.sh
+    volumes:
+    - forward-bridge:/run/dojo-forward
+    depends_on:
+      target:
+        condition: service_started
+      target-netns:
+        condition: service_started
+networks:
+  target-net:
+    internal: true
+volumes:
+  submission: {}
+  forward-bridge: {}
+  oracle-private: {}
+  oracle-seed: {}
+  oracle-proof: {}
+  oracle-socket: {}

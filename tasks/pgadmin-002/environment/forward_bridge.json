@@ -1,0 +1,10 @@
+{
+  "forward": [
+    "80:80"
+  ],
+  "listen_host": "127.0.0.1",
+  "reverse": [],
+  "schema_version": "1.0",
+  "socket_dir": "/run/dojo-forward",
+  "target_host": "127.0.0.1"
+}

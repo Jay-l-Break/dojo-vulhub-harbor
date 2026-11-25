@@ -1,0 +1,24 @@
+{
+  "groups": [
+    {
+      "all_of": [
+        "vite-001:vuln-01:file_access"
+      ],
+      "oracle_group_id": "vite-001:vuln-01",
+      "weight": 1
+    }
+  ],
+  "oracles": [
+    {
+      "oracle_id": "vite-001:vuln-01:file_access",
+      "required_checks": [
+        "seed_confirmed",
+        "secret_match",
+        "path_match"
+      ],
+      "type": "unauthorized_file_access"
+    }
+  ],
+  "schema_version": "1.0",
+  "task_id": "vite-001"
+}
