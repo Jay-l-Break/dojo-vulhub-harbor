@@ -1373,6 +1373,12 @@ def validate_task(
     }
     if core - set(services):
         raise ValueError(f"Missing core services for {task.task_id}")
+    if task.task_id == "chartbrew-001":
+        target_environment = services["target"].get("environment")
+        if not isinstance(target_environment, dict) or target_environment.get(
+            "CB_SECRET"
+        ) != stack_specs.CHARTBREW_SECRET:
+            raise ValueError("Chartbrew target lacks its application secret")
     if services["target"].get("network_mode") != "service:target-netns":
         raise ValueError(f"Target is not isolated for {task.task_id}")
     if services["target-netns"].get("networks") != ["target-net"]:

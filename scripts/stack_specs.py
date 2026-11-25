@@ -103,6 +103,7 @@ ELASTICSEARCH_5_IMAGE = (
     "docker.elastic.co/elasticsearch/elasticsearch:5.0.0@"
     "sha256:07977774e5e1652e5bbe16622e6cc82f6db2c1cf2d664f9ce79dd6e4696ab06f"
 )
+CHARTBREW_SECRET = "dojo-vulhub-chartbrew"
 
 PINNED_IMAGE_REFS = {
     "postgres:9.6-alpine": POSTGRES_9_IMAGE,
@@ -418,8 +419,10 @@ def airflow_services(commit: str) -> dict[str, dict[str, object]]:
 
 def chartbrew_services(commit: str) -> dict[str, dict[str, object]]:
     """Returns Chartbrew and its attacker-selected MongoDB service."""
+    target = default_target_service(commit)
+    target["environment"] = {"CB_SECRET": CHARTBREW_SECRET}
     return {
-        "target": default_target_service(commit),
+        "target": target,
         "mongodb": {
             "image": MONGO_5_IMAGE,
             "healthcheck": {

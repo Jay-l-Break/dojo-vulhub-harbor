@@ -35,6 +35,8 @@ services:
     build:
       context: https://github.com/Jay-l-Break/dojo-vulhub.git#ac251bfbf7ddb17b7752aa419aee72ab9f2dbe84
       dockerfile_inline: "FROM node:14-bullseye@sha256:c0bff0d29a742f40650d5f0305dd581351c10954e6cb6676fc96f47590b9666e\n\nRUN sed -i '/debian-security/d; /bullseye-updates/d' /etc/apt/sources.list \\\n    && apt-get update \\\n    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends mariadb-server \\\n    && rm -rf /var/lib/apt/lists/*\n\nWORKDIR /app/server\nCOPY app/server/package.json app/server/package-lock.json ./\nRUN npm ci --omit=dev\nCOPY app/server/ ./\nCOPY start.js /app/start.js\nCOPY start.sh /app/start.sh\n\nENV NODE_ENV=production\nENV PORT=80\nEXPOSE 80\nCMD [\"sh\", \"/app/start.sh\"]\n"
+    environment:
+      CB_SECRET: dojo-vulhub-chartbrew
     network_mode: service:target-netns
     volumes:
     - oracle-proof:/run/oracle-proof:ro

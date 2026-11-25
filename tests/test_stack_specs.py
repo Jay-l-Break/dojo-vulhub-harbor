@@ -230,9 +230,13 @@ class CustomStackTest(unittest.TestCase):
         self.assertIn("127.0.0.1:5432", environment["AIRFLOW__CORE__SQL_ALCHEMY_CONN"])
         self.assertIn("127.0.0.1:6379", environment["AIRFLOW__CELERY__BROKER_URL"])
 
-    def test_chartbrew_has_public_mongo(self) -> None:
+    def test_chartbrew_has_application_secret_and_public_mongo(self) -> None:
         services = self.build("chartbrew-001")
         self.assertEqual(set(services), {"target", "mongodb"})
+        self.assertEqual(
+            services["target"]["environment"],
+            {"CB_SECRET": stack_specs.CHARTBREW_SECRET},
+        )
         self.assertEqual(services["mongodb"]["image"], stack_specs.MONGO_5_IMAGE)
 
     def test_kibana_one_has_public_elasticsearch(self) -> None:

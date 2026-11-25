@@ -261,6 +261,23 @@ class RenderingTest(unittest.TestCase):
                 "docker/oracle.Dockerfile",
             )
 
+    def test_generated_chartbrew_target_has_application_secret(self) -> None:
+        compose_path = (
+            REPOSITORY_ROOT
+            / "tasks"
+            / "chartbrew-001"
+            / "environment"
+            / "docker-compose.yaml"
+        )
+        compose = generate_tasks.yaml.safe_load(
+            compose_path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            compose["services"]["target"]["environment"],
+            {"CB_SECRET": generate_tasks.stack_specs.CHARTBREW_SECRET},
+        )
+
     def test_comfy_adaptation_uses_fixed_loopback_listener(self) -> None:
         original = (
             "def run():\n"
