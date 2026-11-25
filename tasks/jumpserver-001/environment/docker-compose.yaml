@@ -2,7 +2,7 @@ services:
   main:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/main.Dockerfile
     environment:
       REMOTE_TARGET_URL: http://127.0.0.1
     volumes:
@@ -76,12 +76,12 @@ services:
   oracle-init:
     build:
       context: .
-      dockerfile: Oracle.Dockerfile
+      dockerfile: docker/oracle.Dockerfile
     network_mode: none
     command:
     - /bin/sh
     - -ec
-    - install -m 0755 /usr/local/bin/dojo-rce-helper /run/oracle-proof/helper && python3 /oracle/runtime_oracle.py init --config /oracle/config.json
+    - python3 /oracle/runtime_oracle.py init --config /oracle/config.json
     volumes:
     - oracle-private:/oracle/private
     - oracle-seed:/run/dojo-seed
@@ -91,7 +91,7 @@ services:
   oracle:
     build:
       context: .
-      dockerfile: Oracle.Dockerfile
+      dockerfile: docker/oracle.Dockerfile
     network_mode: service:target-netns
     environment: {}
     command:
@@ -127,7 +127,7 @@ services:
   gateway:
     build:
       context: .
-      dockerfile: Oracle.Dockerfile
+      dockerfile: docker/oracle.Dockerfile
     network_mode: service:target-netns
     command:
     - /opt/dojo/gateway-entrypoint.sh

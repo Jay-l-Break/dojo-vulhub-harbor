@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import tempfile
@@ -48,6 +49,23 @@ def dummy_task(task_id: str = "aiohttp-001") -> generate_tasks.TaskSource:
         runtime_config={"trigger_checks": []},
         application_services={"target": {"build": {"context": "unused"}}},
         poc_directory=Path("/nonexistent"),
+    )
+
+
+def file_access_task(task_id: str = "aiohttp-001") -> generate_tasks.TaskSource:
+    """Build a task source without a remote code execution oracle."""
+    task = dummy_task(task_id)
+    task.contract["oracles"] = [
+        {
+            "oracle_id": f"{task_id}:vuln-01:file_access",
+            "type": "unauthorized_file_access",
+            "required_checks": ["current_run", "secret_match"],
+        }
+    ]
+    task.contract["groups"][0]["all_of"] = [f"{task_id}:vuln-01:file_access"]
+    return dataclasses.replace(
+        task,
+        manifest={"unauthorized_file_access": "vuln-01-file-access.py"},
     )
 
 
@@ -186,7 +204,62 @@ class RenderingTest(unittest.TestCase):
         self.assertIn("rm -rf /app/repo/.git", dockerfile)
         self.assertEqual(dockerfile.count("attack_scope.json"), 2)
         self.assertIn("WORKDIR /app/repo", dockerfile)
-        self.assertNotIn("COPY runtime_config.json", dockerfile)
+        self.assertNotIn("runtime_config.json", dockerfile)
+        self.assertIn(
+            "COPY json/oracle_contract.json /app/oracle_contract.json",
+            dockerfile,
+        )
+
+    def test_callback_config_is_copied_only_for_callback_tasks(self) -> None:
+        ordinary_main = generate_tasks.main_dockerfile(dummy_task())
+        ordinary_oracle = generate_tasks.oracle_dockerfile(dummy_task())
+        callback_task = dummy_task("openclaw-001")
+        callback_main = generate_tasks.main_dockerfile(callback_task)
+        callback_oracle = generate_tasks.oracle_dockerfile(callback_task)
+
+        self.assertNotIn("json/callback_bridge.json", ordinary_main)
+        self.assertNotIn("json/callback_bridge.json", ordinary_oracle)
+        self.assertIn("json/callback_bridge.json", callback_main)
+        self.assertIn("json/callback_bridge.json", callback_oracle)
+
+    def test_rce_helper_build_and_init_are_conditional(self) -> None:
+        rce_task = dummy_task()
+        non_rce_task = file_access_task()
+        rce_dockerfile = generate_tasks.oracle_dockerfile(rce_task)
+        non_rce_dockerfile = generate_tasks.oracle_dockerfile(non_rce_task)
+        rce_services = generate_tasks.trusted_services(rce_task, False)
+        non_rce_services = generate_tasks.trusted_services(non_rce_task, False)
+
+        self.assertIn("COPY go/rce_helper.go", rce_dockerfile)
+        self.assertIn("helper-builder", rce_dockerfile)
+        self.assertIn(
+            "/usr/local/bin/dojo-rce-helper",
+            str(rce_services["oracle-init"]["command"]),
+        )
+        self.assertNotIn("rce_helper.go", non_rce_dockerfile)
+        self.assertNotIn("helper-builder", non_rce_dockerfile)
+        self.assertNotIn("dojo-rce-helper", non_rce_dockerfile)
+        self.assertNotIn(
+            "dojo-rce-helper",
+            str(non_rce_services["oracle-init"]["command"]),
+        )
+
+    def test_compose_uses_organized_dockerfiles(self) -> None:
+        task = dummy_task()
+        services = {
+            "main": generate_tasks.main_service(task, False),
+            **generate_tasks.trusted_services(task, False),
+        }
+
+        self.assertEqual(
+            services["main"]["build"]["dockerfile"],
+            "docker/main.Dockerfile",
+        )
+        for service_name in ("oracle-init", "oracle", "gateway"):
+            self.assertEqual(
+                services[service_name]["build"]["dockerfile"],
+                "docker/oracle.Dockerfile",
+            )
 
     def test_comfy_adaptation_uses_fixed_loopback_listener(self) -> None:
         original = (

@@ -2,7 +2,7 @@ services:
   main:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/main.Dockerfile
     environment:
       REMOTE_TARGET_URL: http://127.0.0.1
     volumes:
@@ -55,7 +55,7 @@ services:
   oracle-init:
     build:
       context: .
-      dockerfile: Oracle.Dockerfile
+      dockerfile: docker/oracle.Dockerfile
     network_mode: none
     command:
     - /bin/sh
@@ -70,7 +70,7 @@ services:
   oracle:
     build:
       context: .
-      dockerfile: Oracle.Dockerfile
+      dockerfile: docker/oracle.Dockerfile
     network_mode: service:target-netns
     environment: {}
     command:
@@ -106,7 +106,7 @@ services:
   gateway:
     build:
       context: .
-      dockerfile: Oracle.Dockerfile
+      dockerfile: docker/oracle.Dockerfile
     network_mode: service:target-netns
     command:
     - /opt/dojo/gateway-entrypoint.sh

@@ -113,18 +113,16 @@ BASE_TASK_FILES = frozenset(
     {
         "task.toml",
         "instruction.md",
-        "environment/Dockerfile",
-        "environment/Oracle.Dockerfile",
+        "environment/docker/main.Dockerfile",
+        "environment/docker/oracle.Dockerfile",
         "environment/docker-compose.yaml",
-        "environment/oracle_contract.json",
-        "environment/runtime_config.json",
-        "environment/forward_bridge.json",
-        "environment/callback_bridge.json",
-        "environment/fixed_bridge.py",
-        "environment/runtime_oracle.py",
-        "environment/rce_helper.go",
-        "environment/main-entrypoint.sh",
-        "environment/gateway-entrypoint.sh",
+        "environment/json/oracle_contract.json",
+        "environment/json/runtime_config.json",
+        "environment/json/forward_bridge.json",
+        "environment/python/fixed_bridge.py",
+        "environment/python/runtime_oracle.py",
+        "environment/shell/main-entrypoint.sh",
+        "environment/shell/gateway-entrypoint.sh",
         "tests/Dockerfile",
         "tests/test.sh",
         "tests/oracle_contract.json",
@@ -137,17 +135,19 @@ BASE_TASK_FILES = frozenset(
     }
 )
 CANONICAL_COPIES = {
-    "environment/fixed_bridge.py": "src/dojo_vulhub_harbor/fixed_bridge.py",
-    "environment/runtime_oracle.py": "src/dojo_vulhub_harbor/runtime_oracle.py",
-    "environment/rce_helper.go": "src/dojo_vulhub_harbor/rce_helper.go",
+    "environment/python/fixed_bridge.py": "src/dojo_vulhub_harbor/fixed_bridge.py",
+    "environment/python/runtime_oracle.py": (
+        "src/dojo_vulhub_harbor/runtime_oracle.py"
+    ),
+    "environment/go/rce_helper.go": "src/dojo_vulhub_harbor/rce_helper.go",
     "tests/oracle_contract.py": "src/dojo_vulhub_harbor/oracle_contract.py",
     "tests/grader.py": "src/dojo_vulhub_harbor/grader.py",
     "tests/cli.py": "src/dojo_vulhub_harbor/cli.py",
     "solution/solution_runner.py": "src/dojo_vulhub_harbor/solution_runner.py",
 }
 EXECUTABLE_FILES = (
-    "environment/main-entrypoint.sh",
-    "environment/gateway-entrypoint.sh",
+    "environment/shell/main-entrypoint.sh",
+    "environment/shell/gateway-entrypoint.sh",
     "tests/test.sh",
     "solution/solve.sh",
 )
@@ -432,10 +432,16 @@ def validate_file_layout(
     task_id: str,
     task_dir: Path,
     manifest: Mapping[str, object] | None,
+    has_callback: bool,
+    has_rce: bool,
     result: ValidationResult,
 ) -> None:
     """Require the generated publication layout and no symlinks."""
     expected = set(BASE_TASK_FILES)
+    if has_callback:
+        expected.add("environment/json/callback_bridge.json")
+    if has_rce:
+        expected.add("environment/go/rce_helper.go")
     if manifest is not None:
         expected.update(
             f"solution/poc/{filename}"
@@ -566,7 +572,7 @@ def validate_collect_hooks(
     result: ValidationResult,
 ) -> None:
     """Require only the collection hooks needed by the runtime config."""
-    runtime = load_json(task_dir / "environment/runtime_config.json", result)
+    runtime = load_json(task_dir / "environment/json/runtime_config.json", result)
     triggers = runtime.get("trigger_checks") if runtime is not None else None
     needs_target = isinstance(triggers, list) and any(
         isinstance(entry, dict) and entry.get("kind") == "file_exists"
@@ -715,7 +721,7 @@ def validate_contract_and_runtime(
     result: ValidationResult,
 ) -> TaskSummary | None:
     """Validate public contracts, runtime topology, and manifest binding."""
-    environment_contract_path = task_dir / "environment/oracle_contract.json"
+    environment_contract_path = task_dir / "environment/json/oracle_contract.json"
     tests_contract_path = task_dir / "tests/oracle_contract.json"
     try:
         environment_bytes = environment_contract_path.read_bytes()
@@ -749,7 +755,7 @@ def validate_contract_and_runtime(
                 contract_document == expected_contract,
                 f"{task_id}: contract differs from canonical manifest contract",
             )
-    runtime_path = task_dir / "environment/runtime_config.json"
+    runtime_path = task_dir / "environment/json/runtime_config.json"
     runtime_document = load_json(runtime_path, result)
     if runtime_document is None:
         return None
@@ -838,12 +844,14 @@ def validate_dockerfiles(
     task_id: str, task_dir: Path, result: ValidationResult
 ) -> None:
     """Validate generated Dockerfiles and offline verifier construction."""
-    for filename in ("Dockerfile", "Oracle.Dockerfile"):
-        path = task_dir / "environment" / filename
+    for filename in ("main.Dockerfile", "oracle.Dockerfile"):
+        path = task_dir / "environment/docker" / filename
         if not path.is_file():
             continue
         content = path.read_text(encoding="utf-8")
-        validate_dockerfile_bases(task_id, f"environment/{filename}", content, result)
+        validate_dockerfile_bases(
+            task_id, f"environment/docker/{filename}", content, result
+        )
     verifier_path = task_dir / "tests/Dockerfile"
     if verifier_path.is_file():
         verifier = verifier_path.read_text(encoding="utf-8")
@@ -863,17 +871,19 @@ def validate_agent_image_boundary(
     task_id: str,
     task_dir: Path,
     source_commit: str | None,
+    has_callback: bool,
+    has_rce: bool,
     result: ValidationResult,
 ) -> None:
     """Keep private runtime configuration outside the agent image."""
-    main_path = task_dir / "environment/Dockerfile"
-    oracle_path = task_dir / "environment/Oracle.Dockerfile"
+    main_path = task_dir / "environment/docker/main.Dockerfile"
+    oracle_path = task_dir / "environment/docker/oracle.Dockerfile"
     if not main_path.is_file() or not oracle_path.is_file():
         return
     main = main_path.read_text(encoding="utf-8")
     oracle = oracle_path.read_text(encoding="utf-8")
     result.check(
-        "COPY oracle_contract.json /app/oracle_contract.json" in main,
+        "COPY json/oracle_contract.json /app/oracle_contract.json" in main,
         f"{task_id}: main image must publish the scoring contract",
     )
     result.check(
@@ -881,8 +891,28 @@ def validate_agent_image_boundary(
         f"{task_id}: main image exposes private runtime configuration",
     )
     result.check(
-        "COPY runtime_config.json /oracle/config.json" in oracle,
+        "COPY json/runtime_config.json /oracle/config.json" in oracle,
         f"{task_id}: oracle image must receive the runtime config",
+    )
+    callback_copy = "COPY json/callback_bridge.json /opt/dojo/callback_bridge.json"
+    for label, dockerfile in (("main", main), ("oracle", oracle)):
+        result.check(
+            (callback_copy in dockerfile) == has_callback,
+            f"{task_id}: {label} callback bridge COPY differs from task topology",
+        )
+    helper_tokens = (
+        "helper-builder",
+        "rce_helper.go",
+        "dojo-rce-helper",
+    )
+    helper_valid = (
+        all(token in oracle for token in helper_tokens)
+        if has_rce
+        else not any(token in oracle for token in helper_tokens)
+    )
+    result.check(
+        helper_valid,
+        f"{task_id}: oracle helper build differs from RCE contract",
     )
     result.check(
         "/oracle/observed/file-creation" in oracle,
@@ -1096,6 +1126,7 @@ def validate_compose_isolation(
     networks: object,
     volumes: object,
     has_file_creation: bool,
+    has_rce: bool,
     result: ValidationResult,
 ) -> None:
     """Validate target netns isolation and named-volume trust boundaries."""
@@ -1246,11 +1277,21 @@ def validate_compose_isolation(
     )
     init_text = json.dumps(oracle_init, sort_keys=True)
     result.check(
-        "/usr/local/bin/dojo-rce-helper" in init_text
-        and "/run/oracle-proof/helper" in init_text
-        and "runtime_oracle.py" in init_text
-        and " init " in f" {init_text} ",
-        f"{task_id}: oracle-init must install the helper and initialize runtime state",
+        "runtime_oracle.py" in init_text and " init " in f" {init_text} ",
+        f"{task_id}: oracle-init must initialize runtime state",
+    )
+    helper_tokens = (
+        "/usr/local/bin/dojo-rce-helper",
+        "/run/oracle-proof/helper",
+    )
+    helper_valid = (
+        all(token in init_text for token in helper_tokens)
+        if has_rce
+        else not any(token in init_text for token in helper_tokens)
+    )
+    result.check(
+        helper_valid,
+        f"{task_id}: oracle-init helper installation differs from RCE contract",
     )
 
 
@@ -1259,6 +1300,7 @@ def validate_compose(
     task_dir: Path,
     source_commit: str | None,
     modules: RepositoryModules,
+    has_rce: bool,
     result: ValidationResult,
 ) -> None:
     """Validate immutable application services and isolated oracle topology."""
@@ -1269,6 +1311,21 @@ def validate_compose(
     if not isinstance(services, dict):
         result.add(f"{task_id}: Compose services must be a mapping")
         return
+    expected_builds = {
+        "main": {"context": ".", "dockerfile": "docker/main.Dockerfile"},
+        "oracle-init": {
+            "context": ".",
+            "dockerfile": "docker/oracle.Dockerfile",
+        },
+        "oracle": {"context": ".", "dockerfile": "docker/oracle.Dockerfile"},
+        "gateway": {"context": ".", "dockerfile": "docker/oracle.Dockerfile"},
+    }
+    for service_name, expected_build in expected_builds.items():
+        service = services.get(service_name)
+        result.check(
+            isinstance(service, dict) and service.get("build") == expected_build,
+            f"{task_id}: {service_name} build does not use the organized Dockerfile",
+        )
     inline_services: set[str] = set()
     for service_name, service in services.items():
         if not isinstance(service_name, str) or not isinstance(service, dict):
@@ -1340,7 +1397,7 @@ def validate_compose(
                 ),
                 f"{task_id}: named volume {volume_name} has unsafe options",
             )
-    runtime = load_json(task_dir / "environment/runtime_config.json", result)
+    runtime = load_json(task_dir / "environment/json/runtime_config.json", result)
     file_creations = runtime.get("file_creations") if runtime is not None else None
     has_file_creation = isinstance(file_creations, list) and bool(file_creations)
     validate_compose_isolation(
@@ -1349,6 +1406,7 @@ def validate_compose(
         compose.get("networks"),
         volumes,
         has_file_creation,
+        has_rce,
         result,
     )
     main = services.get("main")
@@ -1399,13 +1457,13 @@ def validate_bridges(
     callbacks = modules.stack_specs.callback_ports(task_id)
     validate_bridge_config(
         task_id,
-        task_dir / "environment/forward_bridge.json",
+        task_dir / "environment/json/forward_bridge.json",
         forwards,
         {},
         modules,
         result,
     )
-    callback_path = task_dir / "environment/callback_bridge.json"
+    callback_path = task_dir / "environment/json/callback_bridge.json"
     if callbacks:
         validate_bridge_config(
             task_id,
@@ -1416,13 +1474,9 @@ def validate_bridges(
             result,
         )
     else:
-        validate_bridge_config(
-            task_id,
-            callback_path,
-            None,
-            None,
-            modules,
-            result,
+        result.check(
+            not callback_path.exists(),
+            f"{task_id}: non-callback task publishes callback_bridge.json",
         )
 
 
@@ -1433,8 +1487,8 @@ def validate_bridge_entrypoints(
     result: ValidationResult,
 ) -> None:
     """Require bridge roles that match the canonical endpoint semantics."""
-    main_path = task_dir / "environment/main-entrypoint.sh"
-    gateway_path = task_dir / "environment/gateway-entrypoint.sh"
+    main_path = task_dir / "environment/shell/main-entrypoint.sh"
+    gateway_path = task_dir / "environment/shell/gateway-entrypoint.sh"
     if not main_path.is_file() or not gateway_path.is_file():
         return
     main = main_path.read_text(encoding="utf-8")
@@ -1670,7 +1724,15 @@ def validate_task(
     task_dir = repo_root / "tasks" / task_id
     manifest = validate_manifest(task_id, task_dir, result)
     callbacks = modules.stack_specs.callback_ports(task_id)
-    validate_file_layout(task_id, task_dir, manifest, result)
+    has_rce = manifest is not None and "remote_code_execution" in manifest
+    validate_file_layout(
+        task_id,
+        task_dir,
+        manifest,
+        bool(callbacks),
+        has_rce,
+        result,
+    )
     source_commit, metadata_oracle_types = validate_task_toml(task_id, task_dir, result)
     summary = validate_contract_and_runtime(
         task_id, task_dir, manifest, modules, result
@@ -1681,12 +1743,20 @@ def validate_task(
             f"{task_id}: metadata.oracle_types differs from contract",
         )
     validate_dockerfiles(task_id, task_dir, result)
-    validate_agent_image_boundary(task_id, task_dir, source_commit, result)
+    validate_agent_image_boundary(
+        task_id,
+        task_dir,
+        source_commit,
+        bool(callbacks),
+        has_rce,
+        result,
+    )
     validate_compose(
         task_id,
         task_dir,
         source_commit,
         modules,
+        has_rce,
         result,
     )
     validate_bridges(task_id, task_dir, modules, result)

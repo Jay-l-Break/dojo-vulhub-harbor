@@ -53,6 +53,62 @@ class RegistryManifestValidationTest(unittest.TestCase):
         self.assertTrue(any("array" in error for error in errors))
 
 
+class FileLayoutValidationTest(unittest.TestCase):
+    """Checks organized and conditional environment files."""
+
+    def validate(
+        self,
+        has_callback: bool,
+        has_rce: bool,
+        unexpected: tuple[str, ...] = (),
+    ) -> list[str]:
+        """Validate one synthetic generated file tree."""
+        manifest = {"remote_code_execution": "vuln-01.py"} if has_rce else {}
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = pathlib.Path(directory)
+            expected = set(validate_tasks.BASE_TASK_FILES)
+            if has_rce:
+                expected.add("solution/poc/vuln-01.py")
+            if has_callback:
+                expected.add("environment/json/callback_bridge.json")
+            if has_rce:
+                expected.add("environment/go/rce_helper.go")
+            expected.update(unexpected)
+            for relative_path in expected:
+                path = task_dir / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("content\n", encoding="utf-8")
+            for relative_path in validate_tasks.EXECUTABLE_FILES:
+                path = task_dir / relative_path
+                path.chmod(path.stat().st_mode | 0o100)
+            result = validate_tasks.ValidationResult()
+            validate_tasks.validate_file_layout(
+                "example-001",
+                task_dir,
+                manifest,
+                has_callback,
+                has_rce,
+                result,
+            )
+        return result.errors
+
+    def test_accepts_conditional_callback_and_go_files(self) -> None:
+        self.assertEqual(self.validate(has_callback=True, has_rce=True), [])
+        self.assertEqual(self.validate(has_callback=False, has_rce=False), [])
+
+    def test_rejects_conditional_files_for_ineligible_task(self) -> None:
+        errors = self.validate(
+            has_callback=False,
+            has_rce=False,
+            unexpected=(
+                "environment/json/callback_bridge.json",
+                "environment/go/rce_helper.go",
+            ),
+        )
+
+        self.assertTrue(any("generated files differ" in error for error in errors))
+
+
 class InstructionValidationTest(unittest.TestCase):
     """Checks public exploitation protocol instructions."""
 
@@ -187,9 +243,9 @@ class CollectHookValidationTest(unittest.TestCase):
         """Validate hooks against a temporary public runtime config."""
         with tempfile.TemporaryDirectory() as directory:
             task_dir = pathlib.Path(directory)
-            environment = task_dir / "environment"
-            environment.mkdir()
-            (environment / "runtime_config.json").write_text(
+            json_directory = task_dir / "environment/json"
+            json_directory.mkdir(parents=True)
+            (json_directory / "runtime_config.json").write_text(
                 json.dumps({"trigger_checks": triggers}),
                 encoding="utf-8",
             )

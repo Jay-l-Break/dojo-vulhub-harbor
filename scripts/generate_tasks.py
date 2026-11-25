@@ -716,7 +716,7 @@ def main_service(task: TaskSource, has_callback: bool) -> dict[str, object]:
     if task.task_id in {"comfyui-001", "comfyui-002"}:
         environment["POC_GIT_BIND_PORT"] = "40001"
     return {
-        "build": {"context": ".", "dockerfile": "Dockerfile"},
+        "build": {"context": ".", "dockerfile": "docker/main.Dockerfile"},
         "environment": environment,
         "volumes": volumes,
         "depends_on": {
@@ -738,11 +738,13 @@ def oracle_environment(task: TaskSource) -> dict[str, str]:
 
 def trusted_services(task: TaskSource, has_callback: bool) -> dict[str, object]:
     """Build init, oracle, and fixed-gateway services."""
-    init_command = (
-        "install -m 0755 /usr/local/bin/dojo-rce-helper "
-        "/run/oracle-proof/helper && "
-        "python3 /oracle/runtime_oracle.py init --config /oracle/config.json"
-    )
+    init_command = "python3 /oracle/runtime_oracle.py init --config /oracle/config.json"
+    if has_remote_code_execution(task):
+        init_command = (
+            "install -m 0755 /usr/local/bin/dojo-rce-helper "
+            "/run/oracle-proof/helper && "
+            f"{init_command}"
+        )
     gateway_volumes = ["forward-bridge:/run/dojo-forward"]
     if has_callback:
         gateway_volumes.append("callback-bridge:/run/dojo-callback")
@@ -768,13 +770,19 @@ def trusted_services(task: TaskSource, has_callback: bool) -> dict[str, object]:
         )
     return {
         "oracle-init": {
-            "build": {"context": ".", "dockerfile": "Oracle.Dockerfile"},
+            "build": {
+                "context": ".",
+                "dockerfile": "docker/oracle.Dockerfile",
+            },
             "network_mode": "none",
             "command": ["/bin/sh", "-ec", init_command],
             "volumes": init_volumes,
         },
         "oracle": {
-            "build": {"context": ".", "dockerfile": "Oracle.Dockerfile"},
+            "build": {
+                "context": ".",
+                "dockerfile": "docker/oracle.Dockerfile",
+            },
             "network_mode": "service:target-netns",
             "environment": oracle_environment(task),
             "command": [
@@ -805,7 +813,10 @@ def trusted_services(task: TaskSource, has_callback: bool) -> dict[str, object]:
             },
         },
         "gateway": {
-            "build": {"context": ".", "dockerfile": "Oracle.Dockerfile"},
+            "build": {
+                "context": ".",
+                "dockerfile": "docker/oracle.Dockerfile",
+            },
             "network_mode": "service:target-netns",
             "command": ["/opt/dojo/gateway-entrypoint.sh"],
             "volumes": gateway_volumes,
@@ -952,6 +963,11 @@ Each claim contains `oracle_id` and `evidence`. Use the exploit output and the c
 
 def main_dockerfile(task: TaskSource) -> str:
     """Render the agent image."""
+    callback_copy = ""
+    if callback_bridge_config(task.task_id) is not None:
+        callback_copy = (
+            "COPY json/callback_bridge.json /opt/dojo/callback_bridge.json\n"
+        )
     return f"""FROM {MAIN_BASE_IMAGE}
 
 RUN apt-get update \\
@@ -982,11 +998,10 @@ RUN mkdir -p /app/repo/app-source \\
     && find /app/repo -type f -name 'attack_scope.json' -delete \\
     && chown -R agent:agent /app/repo /submission /workspace
 
-COPY fixed_bridge.py /opt/dojo/fixed_bridge.py
-COPY forward_bridge.json /opt/dojo/forward_bridge.json
-COPY callback_bridge.json /opt/dojo/callback_bridge.json
-COPY oracle_contract.json /app/oracle_contract.json
-COPY main-entrypoint.sh /opt/dojo/main-entrypoint.sh
+COPY python/fixed_bridge.py /opt/dojo/fixed_bridge.py
+COPY json/forward_bridge.json /opt/dojo/forward_bridge.json
+{callback_copy}COPY json/oracle_contract.json /app/oracle_contract.json
+COPY shell/main-entrypoint.sh /opt/dojo/main-entrypoint.sh
 RUN chmod 0755 /opt/dojo/main-entrypoint.sh
 
 ENTRYPOINT ["/opt/dojo/main-entrypoint.sh"]
@@ -995,26 +1010,38 @@ CMD ["sleep", "infinity"]
 """
 
 
-def oracle_dockerfile() -> str:
-    """Render the trusted runtime, bridge, and helper image."""
-    return f"""FROM {GO_BASE_IMAGE} AS helper-builder
+def oracle_dockerfile(task: TaskSource) -> str:
+    """Render the trusted runtime and fixed bridge image."""
+    helper_builder = ""
+    helper_copy = ""
+    helper_chmod = ""
+    if has_remote_code_execution(task):
+        helper_builder = f"""FROM {GO_BASE_IMAGE} AS helper-builder
 WORKDIR /src
-COPY rce_helper.go /src/rce_helper.go
+COPY go/rce_helper.go /src/rce_helper.go
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/helper /src/rce_helper.go
 
-FROM {ORACLE_BASE_IMAGE}
+"""
+        helper_copy = (
+            "COPY --from=helper-builder /out/helper /usr/local/bin/dojo-rce-helper\n"
+        )
+        helper_chmod = " /usr/local/bin/dojo-rce-helper"
+    callback_copy = ""
+    if callback_bridge_config(task.task_id) is not None:
+        callback_copy = (
+            "COPY json/callback_bridge.json /opt/dojo/callback_bridge.json\n"
+        )
+    return f"""{helper_builder}FROM {ORACLE_BASE_IMAGE}
 RUN pip install --no-cache-dir 'psycopg[binary]==3.2.13' 'PyMySQL==1.1.2'
 RUN mkdir -p /opt/dojo /oracle/private /submission /run/dojo-seed \\
     /run/oracle-proof /run/dojo-oracle /run/dojo-forward /run/dojo-callback \\
     /oracle/observed/file-creation
-COPY runtime_oracle.py /oracle/runtime_oracle.py
-COPY runtime_config.json /oracle/config.json
-COPY fixed_bridge.py /opt/dojo/fixed_bridge.py
-COPY forward_bridge.json /opt/dojo/forward_bridge.json
-COPY callback_bridge.json /opt/dojo/callback_bridge.json
-COPY gateway-entrypoint.sh /opt/dojo/gateway-entrypoint.sh
-COPY --from=helper-builder /out/helper /usr/local/bin/dojo-rce-helper
-RUN chmod 0755 /opt/dojo/gateway-entrypoint.sh /usr/local/bin/dojo-rce-helper
+COPY python/runtime_oracle.py /oracle/runtime_oracle.py
+COPY json/runtime_config.json /oracle/config.json
+COPY python/fixed_bridge.py /opt/dojo/fixed_bridge.py
+COPY json/forward_bridge.json /opt/dojo/forward_bridge.json
+{callback_copy}COPY shell/gateway-entrypoint.sh /opt/dojo/gateway-entrypoint.sh
+{helper_copy}RUN chmod 0755 /opt/dojo/gateway-entrypoint.sh{helper_chmod}
 """
 
 
@@ -1200,6 +1227,10 @@ def generate_task(
     if task_directory.exists():
         shutil.rmtree(task_directory)
     environment = task_directory / "environment"
+    docker = environment / "docker"
+    python = environment / "python"
+    json_directory = environment / "json"
+    shell = environment / "shell"
     tests = task_directory / "tests"
     solution = task_directory / "solution"
     callback = callback_bridge_config(task.task_id)
@@ -1207,8 +1238,8 @@ def generate_task(
 
     write_text(task_directory / "task.toml", task_toml(task))
     write_text(task_directory / "instruction.md", instruction_text(task))
-    write_text(environment / "Dockerfile", main_dockerfile(task))
-    write_text(environment / "Oracle.Dockerfile", oracle_dockerfile())
+    write_text(docker / "main.Dockerfile", main_dockerfile(task))
+    write_text(docker / "oracle.Dockerfile", oracle_dockerfile(task))
     write_text(
         environment / "docker-compose.yaml",
         yaml.safe_dump(
@@ -1217,28 +1248,30 @@ def generate_task(
             width=1000,
         ),
     )
-    write_text(environment / "oracle_contract.json", canonical_json(task.contract))
-    write_text(environment / "runtime_config.json", canonical_json(task.runtime_config))
+    write_text(json_directory / "oracle_contract.json", canonical_json(task.contract))
     write_text(
-        environment / "forward_bridge.json",
+        json_directory / "runtime_config.json", canonical_json(task.runtime_config)
+    )
+    write_text(
+        json_directory / "forward_bridge.json",
         canonical_json(forward_bridge_config(task.task_id)),
     )
-    callback_document = callback or bridge_config(
-        "/run/dojo-callback", (), ((40000, 40000),)
-    )
-    write_text(environment / "callback_bridge.json", canonical_json(callback_document))
+    if callback is not None:
+        write_text(json_directory / "callback_bridge.json", canonical_json(callback))
     write_text(
-        environment / "main-entrypoint.sh",
+        shell / "main-entrypoint.sh",
         main_entrypoint(has_callback),
         executable=True,
     )
     write_text(
-        environment / "gateway-entrypoint.sh",
+        shell / "gateway-entrypoint.sh",
         gateway_entrypoint(has_callback),
         executable=True,
     )
-    for name in ("fixed_bridge.py", "runtime_oracle.py", "rce_helper.go"):
-        copy_file(canonical[name], environment / name)
+    for name in ("fixed_bridge.py", "runtime_oracle.py"):
+        copy_file(canonical[name], python / name)
+    if has_remote_code_execution(task):
+        copy_file(canonical["rce_helper.go"], environment / "go" / "rce_helper.go")
 
     write_text(tests / "Dockerfile", verifier_dockerfile())
     write_text(tests / "test.sh", verifier_script(), executable=True)
@@ -1286,24 +1319,35 @@ def validate_task(
     if not target_valid or oracle_collect.get("service") != "oracle":
         raise ValueError(f"Invalid collect ordering for {task.task_id}")
     environment = task_directory / "environment"
-    if (environment / "oracle_contract.json").read_bytes() != (
+    json_directory = environment / "json"
+    if (json_directory / "oracle_contract.json").read_bytes() != (
         task_directory / "tests" / "oracle_contract.json"
     ).read_bytes():
         raise ValueError(f"Contract copies differ for {task.task_id}")
-    published_contract = read_json_object(environment / "oracle_contract.json")
+    published_contract = read_json_object(json_directory / "oracle_contract.json")
     expected_contract = oracle_specs.build_contract(task.task_id, task.manifest)
     if published_contract != expected_contract:
         raise ValueError(f"Contract is not canonical for {task.task_id}")
-    published_runtime = read_json_object(environment / "runtime_config.json")
+    published_runtime = read_json_object(json_directory / "runtime_config.json")
     if published_runtime.get("contract") != published_contract:
         raise ValueError(f"Runtime contract differs for {task.task_id}")
-    runtime_oracle.load_runtime_config(environment / "runtime_config.json")
-    fixed_bridge.load_config(environment / "forward_bridge.json")
+    runtime_oracle.load_runtime_config(json_directory / "runtime_config.json")
+    fixed_bridge.load_config(json_directory / "forward_bridge.json")
+    callback_path = json_directory / "callback_bridge.json"
     if stack_specs.callback_ports(task.task_id):
-        fixed_bridge.load_config(environment / "callback_bridge.json")
-    for name in ("fixed_bridge.py", "runtime_oracle.py", "rce_helper.go"):
-        if (environment / name).read_bytes() != canonical[name].read_bytes():
+        fixed_bridge.load_config(callback_path)
+    elif callback_path.exists():
+        raise ValueError(f"Unexpected callback bridge for {task.task_id}")
+    for name in ("fixed_bridge.py", "runtime_oracle.py"):
+        generated = environment / "python" / name
+        if generated.read_bytes() != canonical[name].read_bytes():
             raise ValueError(f"Canonical {name} differs for {task.task_id}")
+    helper_path = environment / "go" / "rce_helper.go"
+    if has_remote_code_execution(task):
+        if helper_path.read_bytes() != canonical["rce_helper.go"].read_bytes():
+            raise ValueError(f"Canonical rce_helper.go differs for {task.task_id}")
+    elif helper_path.exists():
+        raise ValueError(f"Unexpected rce_helper.go for {task.task_id}")
     for name in ("oracle_contract.py", "grader.py", "cli.py"):
         if (task_directory / "tests" / name).read_bytes() != canonical[
             name
@@ -1358,8 +1402,9 @@ def validate_task(
     main_mounts = "\n".join(services["main"].get("volumes", []))
     if any(name in main_mounts for name in forbidden_mounts):
         raise ValueError(f"Trusted volume exposed to main for {task.task_id}")
-    bridge_text = (environment / "forward_bridge.json").read_text(encoding="utf-8")
-    bridge_text += (environment / "callback_bridge.json").read_text(encoding="utf-8")
+    bridge_text = (json_directory / "forward_bridge.json").read_text(encoding="utf-8")
+    if callback_path.exists():
+        bridge_text += callback_path.read_text(encoding="utf-8")
     if "4444" in bridge_text:
         raise ValueError(f"RCE proof port is bridged for {task.task_id}")
     all_public = "\n".join(
