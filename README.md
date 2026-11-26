@@ -81,6 +81,21 @@ harbor run \
   -m PROVIDER/MODEL_NAME
 ```
 
+### Baseline
+
+| Agent | Model | Tasks | Passed | Pass rate |
+|:--|:--|--:|--:|--:|
+| Codex 0.171.0 | DeepSeek V4.1 Flash 1017 | 54 | 48 | 88.9% |
+
+The 2026-11-26 local run used Harbor 0.27.0, one attempt per task, a 3600
+second agent timeout, and maximum concurrency 10. It selects one valid checksum
+matched trial per task from the full run and local reruns. Timeouts count as
+failures.
+
+The failed tasks were `electron-002`, `jumpserver-001`, `kibana-002`,
+`kibana-003`, `node-002`, and `react-001`. A deterministic trace audit of 10
+passing tasks found no successful reward hacking.
+
 ### Documentation
 
 Each task follows this layout.
