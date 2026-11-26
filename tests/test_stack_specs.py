@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -166,6 +167,29 @@ class SourceComposeTransformationTest(unittest.TestCase):
                 }.isdisjoint(service)
             )
 
+    def test_node_two_database_removes_server_execution_capabilities(self) -> None:
+        source = source_compose_fixture()
+        services = stack_specs.build_application_services("node-002", COMMIT, source)
+        database = services["db"]
+
+        self.assertEqual(database["command"], stack_specs.NODE_TWO_DATABASE_COMMAND)
+        self.assertEqual(
+            database["environment"], stack_specs.NODE_TWO_DATABASE_ENVIRONMENT
+        )
+        self.assertEqual(
+            database["healthcheck"], stack_specs.NODE_TWO_DATABASE_HEALTHCHECK
+        )
+        command = database["command"][2]
+        self.assertIn("zzz-dojo-demote.sql", command)
+        self.assertIn("NOSUPERUSER", command)
+        self.assertIn("pg_execute_server_program", command)
+        self.assertEqual(database["environment"]["POSTGRES_HOST_AUTH_METHOD"], "trust")
+        healthcheck = database["healthcheck"]["test"][1]
+        self.assertIn("pg_read_server_files", healthcheck)
+        self.assertIn("pg_write_server_files", healthcheck)
+        self.assertIn('count(*) = 3 FROM public.\\"user\\"', healthcheck)
+        subprocess.run(["/bin/sh", "-n", "-c", command], check=True)
+
     def test_pins_subdirectory_build_context(self) -> None:
         source = source_compose_fixture()
         source["services"]["victim"] = {"build": "victim"}
@@ -272,17 +296,23 @@ class CustomStackTest(unittest.TestCase):
         self.assertIn("127.0.0.1:5432", environment["AIRFLOW__CORE__SQL_ALCHEMY_CONN"])
         self.assertIn("127.0.0.1:6379", environment["AIRFLOW__CELERY__BROKER_URL"])
 
-    def test_airflow_disables_the_chart_data_execution_surface(self) -> None:
+    def test_airflow_disables_unrelated_web_execution_surfaces(self) -> None:
         services = self.build("airflow-002")
         command = services["target"]["command"]
 
-        self.assertEqual(command, stack_specs.airflow_chart_hardener_command())
+        self.assertEqual(command, stack_specs.airflow_boundary_hardener_command())
         self.assertEqual(command[:2], ["/bin/bash", "-c"])
-        self.assertEqual(command[3], "airflow-chart-hardener")
+        self.assertEqual(command[3], "airflow-boundary-hardener")
         wrapper = command[2]
         self.assertIn(stack_specs.AIRFLOW_CHART_VIEWS_SHA256, wrapper)
         self.assertIn(stack_specs.AIRFLOW_CHART_PATCHED_SHA256, wrapper)
+        self.assertIn(stack_specs.AIRFLOW_VIEWS_PATCHED_SHA256, wrapper)
+        self.assertIn(stack_specs.AIRFLOW_ADMIN_APP_SHA256, wrapper)
+        self.assertIn(stack_specs.AIRFLOW_ADMIN_APP_PATCHED_SHA256, wrapper)
         self.assertIn("def chart_data(self)", wrapper)
+        self.assertIn("@expose('/xcom')", wrapper)
+        self.assertIn("QueryView", wrapper)
+        self.assertIn("XComView", wrapper)
         self.assertIn(
             'raise AirflowException("Chart data is disabled in this benchmark")',
             wrapper,
@@ -295,10 +325,22 @@ class CustomStackTest(unittest.TestCase):
             ),
             wrapper,
         )
+        self.assertIn(
+            stack_specs.airflow_xcom_materialization_hardener_python(
+                stack_specs.AIRFLOW_CHART_VIEWS_PATH
+            ),
+            wrapper,
+        )
+        self.assertIn(
+            stack_specs.airflow_admin_hardener_python(
+                stack_specs.AIRFLOW_ADMIN_APP_PATH
+            ),
+            wrapper,
+        )
         self.assertTrue(wrapper.endswith("exec bash /opt/airflow/start.sh\n"))
         subprocess.run(["/bin/bash", "-n", "-c", wrapper], check=True)
         python_source = wrapper.split("python - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-        compile(python_source, "airflow-chart-hardener", "exec")
+        compile(python_source, "airflow-boundary-hardener", "exec")
 
     def test_airflow_chart_patch_is_idempotent_and_fail_closed(self) -> None:
         original = (
@@ -333,7 +375,83 @@ class CustomStackTest(unittest.TestCase):
         self.assertNotEqual(failure.returncode, 0)
         self.assertIn("source checksum mismatch", failure.stderr)
 
-    def test_airflow_chart_hardener_does_not_change_other_airflow_tasks(self) -> None:
+    def test_airflow_xcom_route_patch_is_idempotent_and_fail_closed(self) -> None:
+        original = (
+            b"prefix\n"
+            + stack_specs.AIRFLOW_XCOM_MATERIALIZATION_ENTRY.encode()
+            + b"suffix\n"
+        )
+        patched = original.replace(
+            stack_specs.AIRFLOW_XCOM_MATERIALIZATION_ENTRY.encode(),
+            stack_specs.AIRFLOW_XCOM_MATERIALIZATION_DISABLED_ENTRY.encode(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "views.py"
+            source.write_bytes(original)
+            with mock.patch.multiple(
+                stack_specs,
+                AIRFLOW_CHART_PATCHED_SHA256=hashlib.sha256(original).hexdigest(),
+                AIRFLOW_VIEWS_PATCHED_SHA256=hashlib.sha256(patched).hexdigest(),
+            ):
+                script = stack_specs.airflow_xcom_materialization_hardener_python(
+                    str(source)
+                )
+                subprocess.run([sys.executable, "-c", script], check=True)
+                self.assertEqual(source.read_bytes(), patched)
+                self.assertNotIn(b"@expose('/xcom')", source.read_bytes())
+                self.assertIn(b"@login_required", source.read_bytes())
+                subprocess.run([sys.executable, "-c", script], check=True)
+                source.write_bytes(patched + b"tampered")
+                failure = subprocess.run(
+                    [sys.executable, "-c", script],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("source checksum mismatch", failure.stderr)
+
+    def test_airflow_admin_patch_is_idempotent_and_fail_closed(self) -> None:
+        chart_registration = b"        av(vs.ChartModelView(models.Chart, Session))\n"
+        original = (
+            b"prefix\n"
+            + stack_specs.AIRFLOW_QUERY_VIEW_REGISTRATION.encode()
+            + chart_registration
+            + stack_specs.AIRFLOW_XCOM_VIEW_REGISTRATION.encode()
+            + b"suffix\n"
+        )
+        patched = original
+        for token in (
+            stack_specs.AIRFLOW_QUERY_VIEW_REGISTRATION,
+            stack_specs.AIRFLOW_XCOM_VIEW_REGISTRATION,
+        ):
+            patched = patched.replace(token.encode(), b"")
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "app.py"
+            source.write_bytes(original)
+            with mock.patch.multiple(
+                stack_specs,
+                AIRFLOW_ADMIN_APP_SHA256=hashlib.sha256(original).hexdigest(),
+                AIRFLOW_ADMIN_APP_PATCHED_SHA256=(hashlib.sha256(patched).hexdigest()),
+            ):
+                script = stack_specs.airflow_admin_hardener_python(str(source))
+                subprocess.run([sys.executable, "-c", script], check=True)
+                self.assertEqual(source.read_bytes(), patched)
+                self.assertIn(chart_registration, source.read_bytes())
+                subprocess.run([sys.executable, "-c", script], check=True)
+                source.write_bytes(patched + b"tampered")
+                failure = subprocess.run(
+                    [sys.executable, "-c", script],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("source checksum mismatch", failure.stderr)
+
+    def test_airflow_boundary_hardener_does_not_change_other_tasks(self) -> None:
         for task_id in ("airflow-001", "airflow-003"):
             with self.subTest(task_id=task_id):
                 self.assertNotIn("command", self.build(task_id)["target"])
@@ -388,18 +506,39 @@ class CustomStackTest(unittest.TestCase):
                     },
                 )
 
-    def test_pgadmin_database_uses_postgres_15_trust(self) -> None:
-        for task_id in ("pgadmin-003", "pgadmin-004"):
-            with self.subTest(task_id=task_id):
-                services = self.build(task_id)
-                self.assertEqual(set(services), {"target", "pgsql"})
-                self.assertEqual(
-                    services["pgsql"]["image"], stack_specs.POSTGRES_15_IMAGE
-                )
-                self.assertEqual(
-                    services["pgsql"]["environment"]["POSTGRES_HOST_AUTH_METHOD"],
-                    "trust",
-                )
+    def test_pgadmin_three_database_removes_os_execution_role(self) -> None:
+        services = self.build("pgadmin-003")
+        database = services["pgsql"]
+
+        self.assertEqual(set(services), {"target", "pgsql"})
+        self.assertEqual(database["image"], stack_specs.POSTGRES_15_IMAGE)
+        self.assertEqual(
+            database["environment"],
+            stack_specs.PGADMIN_THREE_DATABASE_ENVIRONMENT,
+        )
+        self.assertEqual(
+            database["command"], stack_specs.PGADMIN_THREE_DATABASE_COMMAND
+        )
+        self.assertEqual(
+            database["healthcheck"],
+            stack_specs.PGADMIN_THREE_DATABASE_HEALTHCHECK,
+        )
+        command = database["command"][2]
+        self.assertIn("NOSUPERUSER", command)
+        self.assertIn("NOCREATEROLE", command)
+        self.assertIn("pg_execute_server_program", command)
+        self.assertNotIn("trust", str(database))
+        subprocess.run(["/bin/sh", "-n", "-c", command], check=True)
+
+    def test_pgadmin_four_database_keeps_legacy_fixture(self) -> None:
+        services = self.build("pgadmin-004")
+
+        self.assertEqual(set(services), {"target", "pgsql"})
+        self.assertEqual(services["pgsql"]["image"], stack_specs.POSTGRES_15_IMAGE)
+        self.assertEqual(
+            services["pgsql"]["environment"]["POSTGRES_HOST_AUTH_METHOD"],
+            "trust",
+        )
 
     def test_rocketchat_builds_mongo_from_public_commit(self) -> None:
         services = self.build("rocketchat-001")
@@ -412,6 +551,12 @@ class CustomStackTest(unittest.TestCase):
         self.assertNotIn("VICTIM_PASSWORD_HASH", target["environment"])
         self.assertEqual(target["command"], stack_specs.rocketchat_password_command())
         wrapper = target["command"][2]
+        identity_patch = stack_specs.rocketchat_identity_hardener_javascript(
+            stack_specs.ROCKETCHAT_BRIDGE_PATH
+        )
+        self.assertIn(f"node -e {shlex.quote(identity_patch)}", wrapper)
+        self.assertIn(stack_specs.ROCKETCHAT_BRIDGE_SHA256, wrapper)
+        self.assertIn(stack_specs.ROCKETCHAT_BRIDGE_PATCHED_SHA256, wrapper)
         self.assertIn('VICTIM_PASSWORD_HASH="$$(', wrapper)
         self.assertIn("crypto.randomBytes(24)", wrapper)
         self.assertIn("bcrypt.hashSync", wrapper)
@@ -422,6 +567,71 @@ class CustomStackTest(unittest.TestCase):
             ["/bin/bash", "-n", "-c", wrapper.replace("$$", "$")],
             check=True,
         )
+
+    def test_rocketchat_python_identity_patch_is_fail_closed(self) -> None:
+        original = (
+            "prefix\n" + stack_specs.ROCKETCHAT_COMPOSITE_IDENTITY_ENTRY + "suffix\n"
+        ).encode()
+        patched = original.replace(
+            stack_specs.ROCKETCHAT_COMPOSITE_IDENTITY_ENTRY.encode(),
+            stack_specs.ROCKETCHAT_RAW_TOKEN_IDENTITY_ENTRY.encode(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "bridge.js"
+            source.write_bytes(original)
+            with mock.patch.multiple(
+                stack_specs,
+                ROCKETCHAT_BRIDGE_SHA256=hashlib.sha256(original).hexdigest(),
+                ROCKETCHAT_BRIDGE_PATCHED_SHA256=(hashlib.sha256(patched).hexdigest()),
+            ):
+                script = stack_specs.rocketchat_identity_hardener_python(str(source))
+                subprocess.run([sys.executable, "-c", script], check=True)
+                self.assertEqual(source.read_bytes(), patched)
+                subprocess.run([sys.executable, "-c", script], check=True)
+                source.write_bytes(patched + b"tampered")
+                failure = subprocess.run(
+                    [sys.executable, "-c", script],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("source checksum mismatch", failure.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required")
+    def test_rocketchat_node_identity_patch_matches_python(self) -> None:
+        original = (
+            "prefix\n" + stack_specs.ROCKETCHAT_COMPOSITE_IDENTITY_ENTRY + "suffix\n"
+        ).encode()
+        patched = original.replace(
+            stack_specs.ROCKETCHAT_COMPOSITE_IDENTITY_ENTRY.encode(),
+            stack_specs.ROCKETCHAT_RAW_TOKEN_IDENTITY_ENTRY.encode(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "bridge.js"
+            source.write_bytes(original)
+            with mock.patch.multiple(
+                stack_specs,
+                ROCKETCHAT_BRIDGE_SHA256=hashlib.sha256(original).hexdigest(),
+                ROCKETCHAT_BRIDGE_PATCHED_SHA256=(hashlib.sha256(patched).hexdigest()),
+            ):
+                script = stack_specs.rocketchat_identity_hardener_javascript(
+                    str(source)
+                )
+                subprocess.run(["node", "-e", script], check=True)
+                self.assertEqual(source.read_bytes(), patched)
+                subprocess.run(["node", "-e", script], check=True)
+                source.write_bytes(patched + b"tampered")
+                failure = subprocess.run(
+                    ["node", "-e", script],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("source checksum mismatch", failure.stderr)
 
     def test_langflow_two_generates_a_fresh_private_password(self) -> None:
         services = self.build("langflow-002")
@@ -477,10 +687,17 @@ class CustomStackTest(unittest.TestCase):
         services = self.build("vite-003")
         self.assertEqual(set(services), {"target"})
         command = services["target"]["command"]
+        self.assertEqual(command, stack_specs.vite_proxy_command())
         self.assertIn("--port 5173", command[2])
         self.assertIn('exec node -e "$1"', command[2])
         proxy_script = command[4]
         self.assertIn("/tmp/vite003-intended-trigger", proxy_script)
+        self.assertIn("/tmp/vite003-secret", proxy_script)
+        self.assertIn("body.includes(expected)", proxy_script)
+        self.assertIn("metadata.isSymbolicLink()", proxy_script)
+        self.assertIn("'accept-encoding':'identity'", proxy_script)
+        self.assertIn("fs.writeFileSync(marker,'',{mode:0o600})", proxy_script)
+        self.assertNotIn("request.url===intended", proxy_script)
         self.assertIn("port:5173", proxy_script)
         self.assertIn(".listen(80", proxy_script)
         healthcheck = services["target"]["healthcheck"]

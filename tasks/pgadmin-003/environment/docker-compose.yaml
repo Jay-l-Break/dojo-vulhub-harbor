@@ -32,7 +32,7 @@ services:
     - target-net
   target:
     build:
-      context: https://github.com/Jay-l-Break/dojo-vulhub.git#e54411038963845a2221e85d3609ac14a9b31101
+      context: https://github.com/Jay-l-Break/dojo-vulhub.git#830984a6bc42cc88d9a025593be5dc704837e099
     environment:
       PGADMIN_CONFIG_SECURITY_EMAIL_VALIDATOR_ARGS: '{''check_deliverability'': False}'
       PGADMIN_DEFAULT_EMAIL: attacker@example.com
@@ -56,12 +56,31 @@ services:
         condition: service_healthy
   pgsql:
     image: public.ecr.aws/docker/library/postgres:15@sha256:91b9edc40277faf94bc1e3d7ae621b185fa70f3099b94309c4731a8296114870
+    command:
+    - /bin/sh
+    - -ec
+    - 'cat > /docker-entrypoint-initdb.d/99-dojo-demote.sql <<''SQL''
+
+      REVOKE pg_execute_server_program FROM postgres;
+
+      REVOKE pg_read_server_files FROM postgres;
+
+      REVOKE pg_write_server_files FROM postgres;
+
+      ALTER ROLE postgres NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+
+      SQL
+
+      exec /usr/local/bin/docker-entrypoint.sh postgres'
     environment:
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: postgres
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_PASSWORD: fixture
+      POSTGRES_USER: postgres
     healthcheck:
       test:
       - CMD-SHELL
-      - pg_isready -U postgres -d postgres
+      - PGPASSWORD=fixture psql -h 127.0.0.1 -U postgres -d postgres -Atqc "SELECT NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls AND NOT pg_has_role(rolname, 'pg_execute_server_program', 'member') FROM pg_roles WHERE rolname = current_user" | grep -qx t
       interval: 2s
       retries: 60
     network_mode: service:target-netns

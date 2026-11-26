@@ -44,15 +44,31 @@ services:
 
         '
     environment:
-      POSTGRES_PASSWORD: node-002-local-test
       POSTGRES_DB: example
       POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_PASSWORD: node-002-local-test
     healthcheck:
       test:
       - CMD-SHELL
-      - test -f /tmp/node-002-db-ready && pg_isready -U postgres -d example
+      - test -f /tmp/node-002-db-ready && PGPASSWORD=node-002-local-test psql -h 127.0.0.1 -U postgres -d example -Atqc "SELECT NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls AND NOT pg_has_role(rolname, 'pg_execute_server_program', 'member') AND NOT pg_has_role(rolname, 'pg_read_server_files', 'member') AND NOT pg_has_role(rolname, 'pg_write_server_files', 'member') AND (SELECT count(*) = 3 FROM public.\"user\") FROM pg_roles WHERE rolname = current_user" | grep -qx t
       interval: 2s
       retries: 20
+    command:
+    - /bin/sh
+    - -ec
+    - 'cat > /docker-entrypoint-initdb.d/zzz-dojo-demote.sql <<''SQL''
+
+      REVOKE pg_execute_server_program FROM postgres;
+
+      REVOKE pg_read_server_files FROM postgres;
+
+      REVOKE pg_write_server_files FROM postgres;
+
+      ALTER ROLE postgres NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+
+      SQL
+
+      exec /usr/local/bin/docker-entrypoint.sh postgres'
     network_mode: service:target-netns
     depends_on:
       target-netns:

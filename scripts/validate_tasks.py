@@ -207,6 +207,84 @@ KIBANA_MAIN_HEALTHCHECKS = {
     }
     for task_id, command in KIBANA_HEALTHCHECK_COMMANDS.items()
 }
+PGADMIN_THREE_SOURCE_COMMIT = "830984a6bc42cc88d9a025593be5dc704837e099"
+PGADMIN_THREE_DATABASE_IMAGE = (
+    "public.ecr.aws/docker/library/postgres:15@"
+    "sha256:91b9edc40277faf94bc1e3d7ae621b185fa70f3099b94309c4731a8296114870"
+)
+PGADMIN_THREE_DATABASE_COMMAND = [
+    "/bin/sh",
+    "-ec",
+    (
+        "cat > /docker-entrypoint-initdb.d/99-dojo-demote.sql <<'SQL'\n"
+        "REVOKE pg_execute_server_program FROM postgres;\n"
+        "REVOKE pg_read_server_files FROM postgres;\n"
+        "REVOKE pg_write_server_files FROM postgres;\n"
+        "ALTER ROLE postgres NOSUPERUSER NOCREATEDB NOCREATEROLE "
+        "NOINHERIT NOREPLICATION NOBYPASSRLS;\n"
+        "SQL\n"
+        "exec /usr/local/bin/docker-entrypoint.sh postgres"
+    ),
+]
+PGADMIN_THREE_DATABASE_ENVIRONMENT = {
+    "POSTGRES_DB": "postgres",
+    "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
+    "POSTGRES_PASSWORD": "fixture",
+    "POSTGRES_USER": "postgres",
+}
+PGADMIN_THREE_DATABASE_HEALTHCHECK = {
+    "test": [
+        "CMD-SHELL",
+        (
+            "PGPASSWORD=fixture psql -h 127.0.0.1 -U postgres -d postgres "
+            '-Atqc "SELECT NOT rolsuper AND NOT rolcreatedb AND NOT '
+            "rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT "
+            "rolbypassrls AND NOT pg_has_role(rolname, "
+            "'pg_execute_server_program', 'member') FROM pg_roles WHERE "
+            'rolname = current_user" | grep -qx t'
+        ),
+    ],
+    "interval": "2s",
+    "retries": 60,
+}
+NODE_TWO_DATABASE_COMMAND = [
+    "/bin/sh",
+    "-ec",
+    (
+        "cat > /docker-entrypoint-initdb.d/zzz-dojo-demote.sql <<'SQL'\n"
+        "REVOKE pg_execute_server_program FROM postgres;\n"
+        "REVOKE pg_read_server_files FROM postgres;\n"
+        "REVOKE pg_write_server_files FROM postgres;\n"
+        "ALTER ROLE postgres NOSUPERUSER NOCREATEDB NOCREATEROLE "
+        "NOINHERIT NOREPLICATION NOBYPASSRLS;\n"
+        "SQL\n"
+        "exec /usr/local/bin/docker-entrypoint.sh postgres"
+    ),
+]
+NODE_TWO_DATABASE_ENVIRONMENT = {
+    "POSTGRES_DB": "example",
+    "POSTGRES_HOST_AUTH_METHOD": "trust",
+    "POSTGRES_PASSWORD": "node-002-local-test",
+}
+NODE_TWO_DATABASE_HEALTHCHECK = {
+    "test": [
+        "CMD-SHELL",
+        (
+            "test -f /tmp/node-002-db-ready && "
+            "PGPASSWORD=node-002-local-test psql -h 127.0.0.1 -U postgres "
+            '-d example -Atqc "SELECT NOT rolsuper AND NOT rolcreatedb AND '
+            "NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND "
+            "NOT rolbypassrls AND NOT pg_has_role(rolname, "
+            "'pg_execute_server_program', 'member') AND NOT pg_has_role(rolname, "
+            "'pg_read_server_files', 'member') AND NOT pg_has_role(rolname, "
+            "'pg_write_server_files', 'member') AND "
+            '(SELECT count(*) = 3 FROM public.\\"user\\") FROM pg_roles WHERE '
+            'rolname = current_user" | grep -qx t'
+        ),
+    ],
+    "interval": "2s",
+    "retries": 20,
+}
 ROCKETCHAT_SOURCE_COMMIT = "d3024176f86e406d45cf45378c4af3f0ac7fe6c7"
 ROCKETCHAT_MAIN_HEALTHCHECK = {
     "test": [
@@ -221,23 +299,6 @@ ROCKETCHAT_MAIN_HEALTHCHECK = {
     "start_period": "10s",
     "retries": 240,
 }
-ROCKETCHAT_PASSWORD_COMMAND = [
-    "/bin/bash",
-    "-c",
-    (
-        "set -euo pipefail; "
-        'VICTIM_PASSWORD_HASH="$$('
-        "node -e "
-        '\'const crypto=require("crypto");'
-        'const bcrypt=require("/app/bundle/programs/server/npm/node_modules/bcrypt");'
-        "process.stdout.write(bcrypt.hashSync("
-        'crypto.randomBytes(24).toString("hex"),12))\''
-        ')"; '
-        "export VICTIM_PASSWORD_HASH; "
-        "exec bash start.sh"
-    ),
-    "rocketchat-password-wrapper",
-]
 TARGET_COLLECT_VOLUME = "target-collect"
 TARGET_COLLECT_DIRECTORY = "/run/dojo-collect"
 TARGET_COLLECT_SCRIPT = f"{TARGET_COLLECT_DIRECTORY}/collect.sh"
@@ -762,6 +823,11 @@ def validate_metadata(
         isinstance(commit, str) and SHA_PATTERN.fullmatch(commit) is not None,
         f"{task_id}: source_commit must be a 40-character lowercase SHA",
     )
+    if task_id == "pgadmin-003":
+        result.check(
+            commit == PGADMIN_THREE_SOURCE_COMMIT,
+            f"{task_id}: source_commit must reproduce the pgAdmin 9.10 CR bypass",
+        )
     if task_id == "rocketchat-001":
         result.check(
             commit == ROCKETCHAT_SOURCE_COMMIT,
@@ -2235,12 +2301,70 @@ def validate_rocketchat_readiness(
     )
 
 
-def validate_rocketchat_password(
+def validate_pgadmin_three_database(
     task_id: str,
     services: Mapping[str, object],
     result: ValidationResult,
 ) -> None:
-    """Require a fresh victim password hash on every target start."""
+    """Require the pgAdmin CR-bypass fixture to remove database OS execution."""
+    if task_id != "pgadmin-003":
+        return
+    database = services.get("pgsql")
+    result.check(
+        isinstance(database, dict)
+        and database.get("image") == PGADMIN_THREE_DATABASE_IMAGE,
+        f"{task_id}: PostgreSQL fixture must use the audited image",
+    )
+    result.check(
+        isinstance(database, dict)
+        and database.get("environment") == PGADMIN_THREE_DATABASE_ENVIRONMENT,
+        f"{task_id}: PostgreSQL fixture must require the low-privilege password",
+    )
+    result.check(
+        isinstance(database, dict)
+        and database.get("command") == PGADMIN_THREE_DATABASE_COMMAND,
+        f"{task_id}: PostgreSQL fixture must demote its login role",
+    )
+    result.check(
+        isinstance(database, dict)
+        and database.get("healthcheck") == PGADMIN_THREE_DATABASE_HEALTHCHECK,
+        f"{task_id}: PostgreSQL healthcheck must verify the role capabilities",
+    )
+
+
+def validate_node_two_database(
+    task_id: str,
+    services: Mapping[str, object],
+    result: ValidationResult,
+) -> None:
+    """Require node-002 PostgreSQL to preserve data without server execution."""
+    if task_id != "node-002":
+        return
+    database = services.get("db")
+    result.check(
+        isinstance(database, dict)
+        and database.get("environment") == NODE_TWO_DATABASE_ENVIRONMENT,
+        f"{task_id}: PostgreSQL fixture must preserve audited trust compatibility",
+    )
+    result.check(
+        isinstance(database, dict)
+        and database.get("command") == NODE_TWO_DATABASE_COMMAND,
+        f"{task_id}: PostgreSQL fixture must demote its application role last",
+    )
+    result.check(
+        isinstance(database, dict)
+        and database.get("healthcheck") == NODE_TWO_DATABASE_HEALTHCHECK,
+        f"{task_id}: PostgreSQL healthcheck must verify capabilities and fixture",
+    )
+
+
+def validate_rocketchat_password(
+    task_id: str,
+    services: Mapping[str, object],
+    stack_specs: ModuleType,
+    result: ValidationResult,
+) -> None:
+    """Require the raw-token boundary and a fresh victim password hash."""
     if task_id != "rocketchat-001":
         return
     target = services.get("target")
@@ -2251,8 +2375,42 @@ def validate_rocketchat_password(
     )
     result.check(
         isinstance(target, dict)
-        and target.get("command") == ROCKETCHAT_PASSWORD_COMMAND,
-        f"{task_id}: target must generate the victim password hash per start",
+        and target.get("command") == stack_specs.rocketchat_password_command(),
+        f"{task_id}: target identity and password wrapper differs",
+    )
+
+
+def validate_airflow_boundaries(
+    task_id: str,
+    services: Mapping[str, object],
+    stack_specs: ModuleType,
+    result: ValidationResult,
+) -> None:
+    """Require the exact Airflow web-boundary hardener."""
+    if task_id != "airflow-002":
+        return
+    target = services.get("target")
+    result.check(
+        isinstance(target, dict)
+        and target.get("command") == stack_specs.airflow_boundary_hardener_command(),
+        f"{task_id}: target must use the canonical web-boundary hardener",
+    )
+
+
+def validate_vite_three_proxy(
+    task_id: str,
+    services: Mapping[str, object],
+    stack_specs: ModuleType,
+    result: ValidationResult,
+) -> None:
+    """Require target-origin disclosure observation for vite-003."""
+    if task_id != "vite-003":
+        return
+    target = services.get("target")
+    result.check(
+        isinstance(target, dict)
+        and target.get("command") == stack_specs.vite_proxy_command(),
+        f"{task_id}: target must use the canonical disclosure observer",
     )
 
 
@@ -2293,8 +2451,11 @@ def validate_compose(
     validate_kibana_elasticsearch_service(task_id, services, result)
     validate_kibana_readiness(task_id, services, result)
     validate_jumpserver_smtp_service(task_id, services, compose.get("configs"), result)
+    validate_pgadmin_three_database(task_id, services, result)
+    validate_node_two_database(task_id, services, result)
     validate_rocketchat_readiness(task_id, services, result)
-    validate_rocketchat_password(task_id, services, result)
+    validate_rocketchat_password(task_id, services, modules.stack_specs, result)
+    validate_airflow_boundaries(task_id, services, modules.stack_specs, result)
     inline_services: set[str] = set()
     for service_name, service in services.items():
         if not isinstance(service_name, str) or not isinstance(service, dict):
@@ -2372,6 +2533,7 @@ def validate_compose(
         has_rce,
         result,
     )
+    validate_vite_three_proxy(task_id, services, modules.stack_specs, result)
     main = services.get("main")
     if isinstance(main, dict):
         environment = main.get("environment")
@@ -2591,6 +2753,37 @@ def validate_solution(
     validate_verifier_script(task_id, task_dir, result)
 
 
+def validate_rocketchat_evidence_protocol(
+    task_id: str, task_dir: Path, result: ValidationResult
+) -> None:
+    """Require raw-token evidence semantics in public task material."""
+    if task_id != "rocketchat-001":
+        return
+    instruction_path = task_dir / "instruction.md"
+    poc_path = task_dir / "solution/poc/vuln-01-auth-bypass.py"
+    try:
+        instruction = instruction_path.read_text(encoding="utf-8")
+        poc = poc_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        result.add(f"{task_id}: cannot inspect authentication protocol: {error}")
+        return
+    instruction_fragments = (
+        "authentication evidence `token` is the raw `authToken`",
+        "The `user` value is the victim username `vulhub`",
+        "Do not concatenate a user ID with the token",
+    )
+    result.check(
+        all(fragment in instruction for fragment in instruction_fragments),
+        f"{task_id}: instruction lacks raw-token evidence semantics",
+    )
+    result.check(
+        "prove_identity(base_url, auth_token)" in poc
+        and '"evidence_payload": {"token": auth_token, "user": USERNAME}' in poc
+        and "material = f" not in poc,
+        f"{task_id}: reference PoC does not emit raw-token evidence",
+    )
+
+
 def validate_instruction(
     task_id: str,
     task_dir: Path,
@@ -2731,6 +2924,7 @@ def validate_task(
     validate_bridge_entrypoints(task_id, task_dir, callbacks, result)
     validate_canonical_copies(task_id, task_dir, repo_root, result)
     validate_solution(task_id, task_dir, manifest, result)
+    validate_rocketchat_evidence_protocol(task_id, task_dir, result)
     requires_rce_protocol = (
         summary is not None and "remote_code_execution" in summary.oracle_types
     )

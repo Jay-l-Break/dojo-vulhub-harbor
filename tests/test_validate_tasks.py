@@ -258,6 +258,19 @@ class MetadataValidationTest(unittest.TestCase):
         validate_tasks.validate_metadata("rocketchat-001", metadata, result)
         self.assertTrue(any("Mongo primary wait" in error for error in result.errors))
 
+    def test_pgadmin_three_requires_cr_bypass_source_commit(self) -> None:
+        metadata = self.metadata()
+        metadata["source_branch"] = "pgadmin-003"
+        metadata["source_commit"] = validate_tasks.PGADMIN_THREE_SOURCE_COMMIT
+        result = validate_tasks.ValidationResult()
+
+        validate_tasks.validate_metadata("pgadmin-003", metadata, result)
+
+        self.assertEqual(result.errors, [])
+        metadata["source_commit"] = "a" * 40
+        validate_tasks.validate_metadata("pgadmin-003", metadata, result)
+        self.assertTrue(any("CR bypass" in error for error in result.errors))
+
 
 class ArtifactValidationTest(unittest.TestCase):
     """Checks ordered trusted and untrusted artifacts."""
@@ -1296,6 +1309,225 @@ class JumpserverSmtpValidationTest(unittest.TestCase):
         self.assertTrue(any("before Oracle readiness" in error for error in errors))
 
 
+class PgAdminThreeDatabaseValidationTest(unittest.TestCase):
+    """Checks pgAdmin's PostgreSQL companion cannot provide substitute RCE."""
+
+    def database(self) -> dict[str, object]:
+        """Return the canonical restricted PostgreSQL fixture."""
+        return {
+            "image": validate_tasks.PGADMIN_THREE_DATABASE_IMAGE,
+            "command": copy.deepcopy(validate_tasks.PGADMIN_THREE_DATABASE_COMMAND),
+            "environment": dict(validate_tasks.PGADMIN_THREE_DATABASE_ENVIRONMENT),
+            "healthcheck": copy.deepcopy(
+                validate_tasks.PGADMIN_THREE_DATABASE_HEALTHCHECK
+            ),
+        }
+
+    def validate(self, database: dict[str, object]) -> list[str]:
+        """Validate one synthetic pgAdmin PostgreSQL service."""
+        result = validate_tasks.ValidationResult()
+        validate_tasks.validate_pgadmin_three_database(
+            "pgadmin-003", {"pgsql": database}, result
+        )
+        return result.errors
+
+    def test_accepts_restricted_database_fixture(self) -> None:
+        self.assertEqual(self.validate(self.database()), [])
+
+    def test_rejects_trust_authenticated_superuser(self) -> None:
+        database = self.database()
+        database["environment"] = {"POSTGRES_HOST_AUTH_METHOD": "trust"}
+        database["command"] = ["postgres"]
+
+        errors = self.validate(database)
+
+        self.assertTrue(any("low-privilege password" in error for error in errors))
+        self.assertTrue(any("demote its login role" in error for error in errors))
+
+    def test_rejects_healthcheck_without_capability_verification(self) -> None:
+        database = self.database()
+        database["healthcheck"] = {
+            "test": ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+        }
+
+        errors = self.validate(database)
+
+        self.assertTrue(any("role capabilities" in error for error in errors))
+
+
+class NodeTwoDatabaseValidationTest(unittest.TestCase):
+    """Checks node-002 PostgreSQL cannot provide substitute RCE."""
+
+    def database(self) -> dict[str, object]:
+        """Return the canonical restricted PostgreSQL fixture."""
+        return {
+            "command": copy.deepcopy(validate_tasks.NODE_TWO_DATABASE_COMMAND),
+            "environment": dict(validate_tasks.NODE_TWO_DATABASE_ENVIRONMENT),
+            "healthcheck": copy.deepcopy(validate_tasks.NODE_TWO_DATABASE_HEALTHCHECK),
+        }
+
+    def validate(self, database: dict[str, object]) -> list[str]:
+        """Validate one synthetic node-002 PostgreSQL service."""
+        result = validate_tasks.ValidationResult()
+        validate_tasks.validate_node_two_database("node-002", {"db": database}, result)
+        return result.errors
+
+    def test_accepts_restricted_database_fixture(self) -> None:
+        self.assertEqual(self.validate(self.database()), [])
+
+    def test_rejects_nonfinal_or_incomplete_demotion(self) -> None:
+        for mutation in ("order", "capability"):
+            with self.subTest(mutation=mutation):
+                database = self.database()
+                command = database["command"]
+                if mutation == "order":
+                    command[2] = command[2].replace(
+                        "zzz-dojo-demote.sql", "99-dojo-demote.sql"
+                    )
+                else:
+                    command[2] = command[2].replace(
+                        "REVOKE pg_execute_server_program FROM postgres;\n", ""
+                    )
+
+                errors = self.validate(database)
+
+                self.assertTrue(
+                    any("demote its application role" in error for error in errors)
+                )
+
+    def test_rejects_changed_trust_fixture(self) -> None:
+        database = self.database()
+        database["environment"]["POSTGRES_HOST_AUTH_METHOD"] = "scram-sha-256"
+
+        errors = self.validate(database)
+
+        self.assertTrue(any("trust compatibility" in error for error in errors))
+
+    def test_rejects_readiness_without_exact_capability_and_data_check(self) -> None:
+        database = self.database()
+        database["healthcheck"] = {
+            "test": [
+                "CMD-SHELL",
+                "test -f /tmp/node-002-db-ready && pg_isready -U postgres -d example",
+            ]
+        }
+
+        errors = self.validate(database)
+
+        self.assertTrue(
+            any("verify capabilities and fixture" in error for error in errors)
+        )
+
+
+class ViteThreeProxyValidationTest(unittest.TestCase):
+    """Checks vite-003 uses target-origin disclosure observation."""
+
+    class StackSpecs:
+        """Provides the canonical target command used by the validator."""
+
+        @staticmethod
+        def vite_proxy_command() -> list[str]:
+            """Return one synthetic canonical disclosure observer."""
+            return ["/bin/sh", "-c", "start", "vite-proxy", "observe-secret"]
+
+    def validate(self, task_id: str, command: list[str]) -> list[str]:
+        """Validate one synthetic Vite target command."""
+        result = validate_tasks.ValidationResult()
+        validate_tasks.validate_vite_three_proxy(
+            task_id,
+            {"target": {"command": command}},
+            self.StackSpecs,
+            result,
+        )
+        return result.errors
+
+    def test_accepts_the_exact_disclosure_observer(self) -> None:
+        command = self.StackSpecs.vite_proxy_command()
+
+        self.assertEqual(self.validate("vite-003", command), [])
+
+    def test_rejects_a_path_only_observer(self) -> None:
+        command = ["/bin/sh", "-c", "start", "vite-proxy", "request.url===intended"]
+
+        errors = self.validate("vite-003", command)
+
+        self.assertTrue(
+            any("canonical disclosure observer" in error for error in errors)
+        )
+
+    def test_does_not_constrain_other_vite_tasks(self) -> None:
+        self.assertEqual(self.validate("vite-001", ["custom"]), [])
+
+
+class AirflowBoundaryValidationTest(unittest.TestCase):
+    """Checks Airflow's task-specific web-boundary hardener."""
+
+    class StackSpecs:
+        """Provides the canonical command used by the validator."""
+
+        @staticmethod
+        def airflow_boundary_hardener_command() -> list[str]:
+            """Return one synthetic canonical hardener command."""
+            return ["/bin/bash", "-c", "patch and start", "airflow-boundary-hardener"]
+
+    def validate(self, task_id: str, command: list[str]) -> list[str]:
+        """Validate one synthetic Airflow target command."""
+        result = validate_tasks.ValidationResult()
+        validate_tasks.validate_airflow_boundaries(
+            task_id,
+            {"target": {"command": command}},
+            self.StackSpecs,
+            result,
+        )
+        return result.errors
+
+    def test_accepts_the_exact_boundary_hardener(self) -> None:
+        command = self.StackSpecs.airflow_boundary_hardener_command()
+
+        self.assertEqual(self.validate("airflow-002", command), [])
+
+    def test_rejects_a_chart_only_or_appended_command(self) -> None:
+        commands = (
+            ["/bin/bash", "-c", "chart patch and start", "airflow-chart-hardener"],
+            self.StackSpecs.airflow_boundary_hardener_command() + ["disable patch"],
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                errors = self.validate("airflow-002", command)
+                self.assertTrue(
+                    any("canonical web-boundary hardener" in error for error in errors)
+                )
+
+    def test_rejects_boundary_without_airflow_xcom_route_patch(self) -> None:
+        repository_root = pathlib.Path(__file__).parents[1]
+        stack_specs = validate_tasks.load_module(
+            repository_root / "scripts/stack_specs.py",
+            "airflow_boundary_validator_stack_specs",
+        )
+        command = stack_specs.airflow_boundary_hardener_command()
+        command[2] = command[2].replace(
+            stack_specs.airflow_xcom_materialization_hardener_python(
+                stack_specs.AIRFLOW_CHART_VIEWS_PATH
+            ),
+            "",
+        )
+        result = validate_tasks.ValidationResult()
+
+        validate_tasks.validate_airflow_boundaries(
+            "airflow-002",
+            {"target": {"command": command}},
+            stack_specs,
+            result,
+        )
+
+        self.assertTrue(
+            any("canonical web-boundary hardener" in error for error in result.errors)
+        )
+
+    def test_does_not_constrain_other_airflow_tasks(self) -> None:
+        self.assertEqual(self.validate("airflow-001", ["custom"]), [])
+
+
 class RocketchatReadinessValidationTest(unittest.TestCase):
     """Checks that Rocket.Chat waits for a live backend API."""
 
@@ -1327,8 +1559,60 @@ class RocketchatReadinessValidationTest(unittest.TestCase):
         self.assertTrue(any("live Rocket.Chat API" in error for error in errors))
 
 
+class RocketchatEvidenceProtocolValidationTest(unittest.TestCase):
+    """Checks Rocket.Chat's public raw-token evidence semantics."""
+
+    def validate(self, instruction: str, poc: str) -> list[str]:
+        """Validate one synthetic instruction and reference PoC."""
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = pathlib.Path(directory)
+            poc_path = task_dir / "solution/poc/vuln-01-auth-bypass.py"
+            poc_path.parent.mkdir(parents=True)
+            (task_dir / "instruction.md").write_text(instruction, encoding="utf-8")
+            poc_path.write_text(poc, encoding="utf-8")
+            result = validate_tasks.ValidationResult()
+            validate_tasks.validate_rocketchat_evidence_protocol(
+                "rocketchat-001", task_dir, result
+            )
+        return result.errors
+
+    def test_accepts_raw_auth_token_and_public_username(self) -> None:
+        instruction = (
+            "authentication evidence `token` is the raw `authToken`. "
+            "The `user` value is the victim username `vulhub`. "
+            "Do not concatenate a user ID with the token."
+        )
+        poc = (
+            "prove_identity(base_url, auth_token)\n"
+            '"evidence_payload": {"token": auth_token, "user": USERNAME}\n'
+        )
+
+        self.assertEqual(self.validate(instruction, poc), [])
+
+    def test_rejects_composite_identity_material(self) -> None:
+        errors = self.validate(
+            "Authentication evidence contains token and user.",
+            'material = f"{user_id}:{auth_token}"\n',
+        )
+
+        self.assertTrue(
+            any("raw-token evidence semantics" in error for error in errors)
+        )
+        self.assertTrue(
+            any("does not emit raw-token evidence" in error for error in errors)
+        )
+
+
 class RocketchatPasswordValidationTest(unittest.TestCase):
     """Checks Rocket.Chat's per-start victim credential generation."""
+
+    def setUp(self) -> None:
+        """Load the canonical Rocket.Chat stack specification."""
+        repository_root = pathlib.Path(__file__).parents[1]
+        self.stack_specs = validate_tasks.load_module(
+            repository_root / "scripts/stack_specs.py",
+            "rocketchat_validator_stack_specs",
+        )
 
     def validate(self, target: dict[str, object]) -> list[str]:
         """Validate one synthetic Rocket.Chat target service."""
@@ -1336,6 +1620,7 @@ class RocketchatPasswordValidationTest(unittest.TestCase):
         validate_tasks.validate_rocketchat_password(
             "rocketchat-001",
             {"target": target},
+            self.stack_specs,
             result,
         )
         return result.errors
@@ -1343,7 +1628,7 @@ class RocketchatPasswordValidationTest(unittest.TestCase):
     def test_accepts_fresh_bcrypt_wrapper(self) -> None:
         target = {
             "environment": {"MONGO_URL": "mongodb://127.0.0.1/database"},
-            "command": validate_tasks.ROCKETCHAT_PASSWORD_COMMAND,
+            "command": self.stack_specs.rocketchat_password_command(),
         }
 
         self.assertEqual(self.validate(target), [])
@@ -1357,7 +1642,24 @@ class RocketchatPasswordValidationTest(unittest.TestCase):
         errors = self.validate(target)
 
         self.assertTrue(any("fixed victim password" in error for error in errors))
-        self.assertTrue(any("per start" in error for error in errors))
+        self.assertTrue(
+            any("identity and password wrapper" in error for error in errors)
+        )
+
+    def test_rejects_wrapper_without_raw_token_boundary(self) -> None:
+        command = self.stack_specs.rocketchat_password_command()
+        password_start = command[2].index("VICTIM_PASSWORD_HASH")
+        command[2] = "set -euo pipefail; " + command[2][password_start:]
+        target = {
+            "environment": {"MONGO_URL": "mongodb://127.0.0.1/database"},
+            "command": command,
+        }
+
+        errors = self.validate(target)
+
+        self.assertTrue(
+            any("identity and password wrapper" in error for error in errors)
+        )
 
 
 if __name__ == "__main__":

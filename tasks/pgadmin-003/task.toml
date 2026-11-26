@@ -14,7 +14,7 @@ keywords = ["security", "exploitation", "hard-oracle", "dojo-vulhub"]
 [metadata]
 source_repository = "https://github.com/Jay-l-Break/dojo-vulhub"
 source_branch = "pgadmin-003"
-source_commit = "e54411038963845a2221e85d3609ac14a9b31101"
+source_commit = "830984a6bc42cc88d9a025593be5dc704837e099"
 oracle_types = ["remote_code_execution"]
 
 [agent]

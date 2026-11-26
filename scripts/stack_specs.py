@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
+import shlex
 
 SOURCE_REPOSITORY = "https://github.com/Jay-l-Break/dojo-vulhub.git"
 TASK_IDS = frozenset(
@@ -91,6 +93,79 @@ POSTGRES_15_IMAGE = (
     "public.ecr.aws/docker/library/postgres:15@"
     "sha256:91b9edc40277faf94bc1e3d7ae621b185fa70f3099b94309c4731a8296114870"
 )
+PGADMIN_THREE_DATABASE_COMMAND = [
+    "/bin/sh",
+    "-ec",
+    (
+        "cat > /docker-entrypoint-initdb.d/99-dojo-demote.sql <<'SQL'\n"
+        "REVOKE pg_execute_server_program FROM postgres;\n"
+        "REVOKE pg_read_server_files FROM postgres;\n"
+        "REVOKE pg_write_server_files FROM postgres;\n"
+        "ALTER ROLE postgres NOSUPERUSER NOCREATEDB NOCREATEROLE "
+        "NOINHERIT NOREPLICATION NOBYPASSRLS;\n"
+        "SQL\n"
+        "exec /usr/local/bin/docker-entrypoint.sh postgres"
+    ),
+]
+PGADMIN_THREE_DATABASE_ENVIRONMENT = {
+    "POSTGRES_DB": "postgres",
+    "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
+    "POSTGRES_PASSWORD": "fixture",
+    "POSTGRES_USER": "postgres",
+}
+PGADMIN_THREE_DATABASE_HEALTHCHECK = {
+    "test": [
+        "CMD-SHELL",
+        (
+            "PGPASSWORD=fixture psql -h 127.0.0.1 -U postgres -d postgres "
+            '-Atqc "SELECT NOT rolsuper AND NOT rolcreatedb AND NOT '
+            "rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT "
+            "rolbypassrls AND NOT pg_has_role(rolname, "
+            "'pg_execute_server_program', 'member') FROM pg_roles WHERE "
+            'rolname = current_user" | grep -qx t'
+        ),
+    ],
+    "interval": "2s",
+    "retries": 60,
+}
+NODE_TWO_DATABASE_COMMAND = [
+    "/bin/sh",
+    "-ec",
+    (
+        "cat > /docker-entrypoint-initdb.d/zzz-dojo-demote.sql <<'SQL'\n"
+        "REVOKE pg_execute_server_program FROM postgres;\n"
+        "REVOKE pg_read_server_files FROM postgres;\n"
+        "REVOKE pg_write_server_files FROM postgres;\n"
+        "ALTER ROLE postgres NOSUPERUSER NOCREATEDB NOCREATEROLE "
+        "NOINHERIT NOREPLICATION NOBYPASSRLS;\n"
+        "SQL\n"
+        "exec /usr/local/bin/docker-entrypoint.sh postgres"
+    ),
+]
+NODE_TWO_DATABASE_ENVIRONMENT = {
+    "POSTGRES_DB": "example",
+    "POSTGRES_HOST_AUTH_METHOD": "trust",
+    "POSTGRES_PASSWORD": "node-002-local-test",
+}
+NODE_TWO_DATABASE_HEALTHCHECK = {
+    "test": [
+        "CMD-SHELL",
+        (
+            "test -f /tmp/node-002-db-ready && "
+            "PGPASSWORD=node-002-local-test psql -h 127.0.0.1 -U postgres "
+            '-d example -Atqc "SELECT NOT rolsuper AND NOT rolcreatedb AND '
+            "NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND "
+            "NOT rolbypassrls AND NOT pg_has_role(rolname, "
+            "'pg_execute_server_program', 'member') AND NOT pg_has_role(rolname, "
+            "'pg_read_server_files', 'member') AND NOT pg_has_role(rolname, "
+            "'pg_write_server_files', 'member') AND "
+            '(SELECT count(*) = 3 FROM public.\\"user\\") FROM pg_roles WHERE '
+            'rolname = current_user" | grep -qx t'
+        ),
+    ],
+    "interval": "2s",
+    "retries": 20,
+}
 PYTHON_3_10_IMAGE = (
     "python:3.10-slim-bookworm@"
     "sha256:5be5aaecb962a41567bc8041f1e9e3432cb085b037fe057f9a562630b2e4b370"
@@ -127,6 +202,57 @@ AIRFLOW_CHART_DISABLED_ENTRY = (
     '        raise AirflowException("Chart data is disabled in this benchmark")\n'
     "        from airflow import macros\n"
 )
+AIRFLOW_VIEWS_PATCHED_SHA256 = (
+    "8e93579dd8e4374a2f3f445485802da2018d9bc727fca13b7ff2901b9511e5ca"
+)
+AIRFLOW_XCOM_MATERIALIZATION_ENTRY = (
+    "    @expose('/xcom')\n"
+    "    @login_required\n"
+    "    @wwwutils.action_logging\n"
+    "    def xcom(self):\n"
+)
+AIRFLOW_XCOM_MATERIALIZATION_DISABLED_ENTRY = (
+    "    @login_required\n    @wwwutils.action_logging\n    def xcom(self):\n"
+)
+AIRFLOW_ADMIN_APP_PATH = "/opt/airflow-source/airflow/www/app.py"
+AIRFLOW_ADMIN_APP_SHA256 = (
+    "579b381714a1d9dbdba970ce87da04bb8fc2f2a4f9e94c08aa4f3fd1921d550a"
+)
+AIRFLOW_ADMIN_APP_PATCHED_SHA256 = (
+    "3a350c58d5fb24e127a28ebfa2afa58f9c622567dc27b5046d9f1cd5637afba2"
+)
+AIRFLOW_QUERY_VIEW_REGISTRATION = (
+    "        av(vs.QueryView(name='Ad Hoc Query', category=\"Data Profiling\"))\n"
+)
+AIRFLOW_XCOM_VIEW_REGISTRATION = (
+    "        av(vs.XComView(\n"
+    '            models.XCom, Session, name="XComs", category="Admin"))\n'
+)
+ROCKETCHAT_BRIDGE_PATH = "/app/bundle/bridge.js"
+ROCKETCHAT_BRIDGE_SHA256 = (
+    "0a971bc4bd51bf046b5fbe059044bc8ce17a1d171eb05b2a79f5589e0b4626c1"
+)
+ROCKETCHAT_BRIDGE_PATCHED_SHA256 = (
+    "59f00d14b9bfbb5b2350c52292a7dc2d2ac322319260ec6217fafc8a1b3d0917"
+)
+ROCKETCHAT_COMPOSITE_IDENTITY_ENTRY = """  const material = request.headers['x-rocket-identity'] || '';
+  const separator = material.indexOf(':');
+  if (separator < 1) {
+    response.writeHead(401);
+    response.end('Missing identity');
+    return;
+  }
+  const userId = material.slice(0, separator);
+  const token = material.slice(separator + 1);
+"""
+ROCKETCHAT_RAW_TOKEN_IDENTITY_ENTRY = """  const token = request.headers['x-rocket-identity'] || '';
+  if (!token) {
+    response.writeHead(401);
+    response.end('Missing token');
+    return;
+  }
+  const userId = user.user_id;
+"""
 
 PINNED_IMAGE_REFS = {
     "postgres:9.6-alpine": POSTGRES_9_IMAGE,
@@ -188,24 +314,42 @@ SERVICE_ENVIRONMENT_OVERRIDES = {
 
 VITE_PROXY_SCRIPT = (
     "const http=require('node:http');const fs=require('node:fs');"
-    "const intended='/@fs/app/#/../../../tmp/vite003-secret';"
+    "const secret='/tmp/vite003-secret';"
     "const marker='/tmp/vite003-intended-trigger';"
+    "const maxBody=2097152;"
     "try{fs.unlinkSync(marker)}catch(error){if(error.code!=='ENOENT')throw error}"
-    "http.createServer((request,response)=>{const upstream=http.request({"
-    "hostname:'127.0.0.1',port:5173,path:request.url,method:request.method,"
-    "headers:{...request.headers,host:'127.0.0.1:5173'}},upstreamResponse=>{"
-    "if(request.url===intended){const chunks=[];"
-    "upstreamResponse.on('data',chunk=>chunks.push(chunk));"
-    "upstreamResponse.on('end',()=>{const body=Buffer.concat(chunks);"
-    "if(upstreamResponse.statusCode===200)"
-    "fs.writeFileSync(marker,body,{mode:0o600});"
+    "function recordDisclosure(statusCode,body){if(statusCode!==200)return;"
+    "try{const metadata=fs.lstatSync(secret);"
+    "if(!metadata.isFile()||metadata.isSymbolicLink())return;"
+    "const expected=fs.readFileSync(secret);"
+    "if(expected.length===0||expected.length>4096||!body.includes(expected))return;"
+    "fs.writeFileSync(marker,'',{mode:0o600})}"
+    "catch(error){if(error.code!=='ENOENT')throw error}}"
+    "http.createServer((request,response)=>{const headers={...request.headers,"
+    "host:'127.0.0.1:5173','accept-encoding':'identity'};"
+    "const upstream=http.request({hostname:'127.0.0.1',port:5173,"
+    "path:request.url,method:request.method,headers},upstreamResponse=>{"
+    "const chunks=[];let bodySize=0;let overflow=false;"
     "response.writeHead(upstreamResponse.statusCode,upstreamResponse.headers);"
-    "response.end(body)})}else{"
-    "response.writeHead(upstreamResponse.statusCode,upstreamResponse.headers);"
-    "upstreamResponse.pipe(response)}});upstream.on('error',error=>{"
+    "upstreamResponse.on('data',chunk=>{if(!overflow){bodySize+=chunk.length;"
+    "if(bodySize<=maxBody)chunks.push(chunk);else overflow=true}response.write(chunk)});"
+    "upstreamResponse.on('end',()=>{if(!overflow)"
+    "recordDisclosure(upstreamResponse.statusCode,Buffer.concat(chunks));"
+    "response.end()})});upstream.on('error',error=>{"
     "response.writeHead(502);response.end(error.message)});request.pipe(upstream)"
     "}).listen(80,'0.0.0.0')"
 )
+
+
+def vite_proxy_command() -> list[str]:
+    """Returns the Vite target command with live disclosure observation."""
+    return [
+        "/bin/sh",
+        "-c",
+        'npm run dev -- --host 0.0.0.0 --port 5173 & exec node -e "$1"',
+        "vite-proxy",
+        VITE_PROXY_SCRIPT,
+    ]
 
 
 def validate_task_id(task_id: str) -> None:
@@ -356,6 +500,20 @@ def apply_service_environment(
         service["environment"] = environment
 
 
+def harden_node_two_database(
+    task_id: str, services: dict[str, dict[str, object]]
+) -> None:
+    """Remove server-side execution capabilities from node-002 PostgreSQL."""
+    if task_id != "node-002":
+        return
+    database = services.get("db")
+    if database is None:
+        raise ValueError("node-002 source Compose has no db service")
+    database["command"] = copy.deepcopy(NODE_TWO_DATABASE_COMMAND)
+    database["environment"] = dict(NODE_TWO_DATABASE_ENVIRONMENT)
+    database["healthcheck"] = copy.deepcopy(NODE_TWO_DATABASE_HEALTHCHECK)
+
+
 def add_jumpserver_smtp_service(
     task_id: str, services: dict[str, dict[str, object]]
 ) -> None:
@@ -438,6 +596,7 @@ def transform_source_compose(
         kibana_proxy_services(task_id, commit, services)
     add_jumpserver_smtp_service(task_id, services)
     apply_service_environment(task_id, services)
+    harden_node_two_database(task_id, services)
     return services
 
 
@@ -460,22 +619,82 @@ if digest == {AIRFLOW_CHART_VIEWS_SHA256!r}:
     if source.count(old) != 1 or source.count(new) != 0:
         raise SystemExit("Airflow chart hardener token mismatch")
     path.write_bytes(source.replace(old, new))
-elif digest != {AIRFLOW_CHART_PATCHED_SHA256!r}:
+elif digest not in ({AIRFLOW_CHART_PATCHED_SHA256!r}, {AIRFLOW_VIEWS_PATCHED_SHA256!r}):
     raise SystemExit("Airflow chart hardener source checksum mismatch")
-if hashlib.sha256(path.read_bytes()).hexdigest() != {AIRFLOW_CHART_PATCHED_SHA256!r}:
+if hashlib.sha256(path.read_bytes()).hexdigest() not in (
+    {AIRFLOW_CHART_PATCHED_SHA256!r},
+    {AIRFLOW_VIEWS_PATCHED_SHA256!r},
+):
     raise SystemExit("Airflow chart hardener output checksum mismatch")
 """
 
 
-def airflow_chart_hardener_command() -> list[str]:
-    """Returns a fail-closed wrapper for the chart_data execution surface."""
-    patch = airflow_chart_hardener_python(AIRFLOW_CHART_VIEWS_PATH)
+def airflow_xcom_materialization_hardener_python(source_path: str) -> str:
+    """Returns the checksum-guarded XCom route patch."""
+    return f"""import hashlib
+import pathlib
+
+path = pathlib.Path({source_path!r})
+source = path.read_bytes()
+digest = hashlib.sha256(source).hexdigest()
+old = {AIRFLOW_XCOM_MATERIALIZATION_ENTRY.encode()!r}
+new = {AIRFLOW_XCOM_MATERIALIZATION_DISABLED_ENTRY.encode()!r}
+if digest == {AIRFLOW_CHART_PATCHED_SHA256!r}:
+    if source.count(old) != 1:
+        raise SystemExit("Airflow XCom hardener token mismatch")
+    path.write_bytes(source.replace(old, new))
+elif digest != {AIRFLOW_VIEWS_PATCHED_SHA256!r}:
+    raise SystemExit("Airflow XCom hardener source checksum mismatch")
+if hashlib.sha256(path.read_bytes()).hexdigest() != {AIRFLOW_VIEWS_PATCHED_SHA256!r}:
+    raise SystemExit("Airflow XCom hardener output checksum mismatch")
+"""
+
+
+def airflow_admin_hardener_python(source_path: str) -> str:
+    """Returns the checksum-guarded unsafe admin-view registration patch."""
+    return f"""import hashlib
+import pathlib
+
+path = pathlib.Path({source_path!r})
+source = path.read_bytes()
+digest = hashlib.sha256(source).hexdigest()
+blocked = (
+    {AIRFLOW_QUERY_VIEW_REGISTRATION.encode()!r},
+    {AIRFLOW_XCOM_VIEW_REGISTRATION.encode()!r},
+)
+if digest == {AIRFLOW_ADMIN_APP_SHA256!r}:
+    if [source.count(token) for token in blocked] != [1, 1]:
+        raise SystemExit("Airflow admin hardener token mismatch")
+    for token in blocked:
+        source = source.replace(token, b"")
+    path.write_bytes(source)
+elif digest != {AIRFLOW_ADMIN_APP_PATCHED_SHA256!r}:
+    raise SystemExit("Airflow admin hardener source checksum mismatch")
+if hashlib.sha256(path.read_bytes()).hexdigest() != {AIRFLOW_ADMIN_APP_PATCHED_SHA256!r}:
+    raise SystemExit("Airflow admin hardener output checksum mismatch")
+"""
+
+
+def airflow_boundary_hardener_python(views_path: str, app_path: str) -> str:
+    """Returns all checksum-guarded Airflow web boundary patches."""
+    return (
+        airflow_chart_hardener_python(views_path)
+        + airflow_xcom_materialization_hardener_python(views_path)
+        + airflow_admin_hardener_python(app_path)
+    )
+
+
+def airflow_boundary_hardener_command() -> list[str]:
+    """Returns a fail-closed wrapper for unrelated Airflow web surfaces."""
+    patch = airflow_boundary_hardener_python(
+        AIRFLOW_CHART_VIEWS_PATH, AIRFLOW_ADMIN_APP_PATH
+    )
     script = f"""set -euo pipefail
 python - <<'PY'
 {patch}PY
 exec bash /opt/airflow/start.sh
 """
-    return ["/bin/bash", "-c", script, "airflow-chart-hardener"]
+    return ["/bin/bash", "-c", script, "airflow-boundary-hardener"]
 
 
 def airflow_services(commit: str) -> dict[str, dict[str, object]]:
@@ -490,7 +709,7 @@ def airflow_services(commit: str) -> dict[str, dict[str, object]]:
             "db+postgresql://airflow:airflow@127.0.0.1:5432/airflow"
         ),
     }
-    target["command"] = airflow_chart_hardener_command()
+    target["command"] = airflow_boundary_hardener_command()
     return {
         "target": target,
         "postgres": {
@@ -575,10 +794,16 @@ def pgadmin_target_service(task_id: str, commit: str) -> dict[str, object]:
 
 
 def pgadmin_services(task_id: str, commit: str) -> dict[str, dict[str, object]]:
-    """Returns pgAdmin and its trust-authenticated PostgreSQL fixture."""
-    return {
-        "target": pgadmin_target_service(task_id, commit),
-        "pgsql": {
+    """Returns pgAdmin and its task-specific PostgreSQL fixture."""
+    if task_id == "pgadmin-003":
+        database = {
+            "image": POSTGRES_15_IMAGE,
+            "command": copy.deepcopy(PGADMIN_THREE_DATABASE_COMMAND),
+            "environment": dict(PGADMIN_THREE_DATABASE_ENVIRONMENT),
+            "healthcheck": copy.deepcopy(PGADMIN_THREE_DATABASE_HEALTHCHECK),
+        }
+    else:
+        database = {
             "image": POSTGRES_15_IMAGE,
             "environment": {"POSTGRES_HOST_AUTH_METHOD": "trust"},
             "healthcheck": {
@@ -586,14 +811,70 @@ def pgadmin_services(task_id: str, commit: str) -> dict[str, dict[str, object]]:
                 "interval": "2s",
                 "retries": 60,
             },
-        },
+        }
+    return {
+        "target": pgadmin_target_service(task_id, commit),
+        "pgsql": database,
     }
 
 
+def rocketchat_identity_hardener_python(source_path: str) -> str:
+    """Returns the checksum-guarded raw-token bridge patch."""
+    return f"""import hashlib
+import pathlib
+
+path = pathlib.Path({source_path!r})
+source = path.read_bytes()
+digest = hashlib.sha256(source).hexdigest()
+old = {ROCKETCHAT_COMPOSITE_IDENTITY_ENTRY.encode()!r}
+new = {ROCKETCHAT_RAW_TOKEN_IDENTITY_ENTRY.encode()!r}
+if digest == {ROCKETCHAT_BRIDGE_SHA256!r}:
+    if source.count(old) != 1 or source.count(new) != 0:
+        raise SystemExit("Rocket.Chat identity hardener token mismatch")
+    path.write_bytes(source.replace(old, new))
+elif digest != {ROCKETCHAT_BRIDGE_PATCHED_SHA256!r}:
+    raise SystemExit("Rocket.Chat identity hardener source checksum mismatch")
+if hashlib.sha256(path.read_bytes()).hexdigest() != {ROCKETCHAT_BRIDGE_PATCHED_SHA256!r}:
+    raise SystemExit("Rocket.Chat identity hardener output checksum mismatch")
+"""
+
+
+def rocketchat_identity_hardener_javascript(source_path: str) -> str:
+    """Returns the Node-compatible raw-token bridge patch."""
+    path = json.dumps(source_path)
+    old = json.dumps(ROCKETCHAT_COMPOSITE_IDENTITY_ENTRY)
+    new = json.dumps(ROCKETCHAT_RAW_TOKEN_IDENTITY_ENTRY)
+    original_digest = json.dumps(ROCKETCHAT_BRIDGE_SHA256)
+    patched_digest = json.dumps(ROCKETCHAT_BRIDGE_PATCHED_SHA256)
+    return f"""const crypto = require("crypto");
+const fs = require("fs");
+const path = {path};
+let source = fs.readFileSync(path, "utf8");
+const digest = crypto.createHash("sha256").update(source).digest("hex");
+const old = {old};
+const replacement = {new};
+if (digest === {original_digest}) {{
+  if (source.split(old).length - 1 !== 1 || source.includes(replacement)) {{
+    throw new Error("Rocket.Chat identity hardener token mismatch");
+  }}
+  source = source.replace(old, replacement);
+  fs.writeFileSync(path, source);
+}} else if (digest !== {patched_digest}) {{
+  throw new Error("Rocket.Chat identity hardener source checksum mismatch");
+}}
+const output = fs.readFileSync(path);
+if (crypto.createHash("sha256").update(output).digest("hex") !== {patched_digest}) {{
+  throw new Error("Rocket.Chat identity hardener output checksum mismatch");
+}}
+"""
+
+
 def rocketchat_password_command() -> list[str]:
-    """Returns the per-start victim credential wrapper."""
+    """Returns the identity boundary and per-start victim credential wrapper."""
+    identity_patch = rocketchat_identity_hardener_javascript(ROCKETCHAT_BRIDGE_PATH)
     wrapper = (
         "set -euo pipefail; "
+        f"node -e {shlex.quote(identity_patch)}; "
         'VICTIM_PASSWORD_HASH="$$('
         "node -e "
         '\'const crypto=require("crypto");'
@@ -671,13 +952,7 @@ def vite_three_services(commit: str) -> dict[str, dict[str, object]]:
     return {
         "target": {
             "build": {"context": pinned_build_context(commit)},
-            "command": [
-                "/bin/sh",
-                "-c",
-                ('npm run dev -- --host 0.0.0.0 --port 5173 & exec node -e "$1"'),
-                "vite-proxy",
-                VITE_PROXY_SCRIPT,
-            ],
+            "command": vite_proxy_command(),
             "healthcheck": {
                 "test": [
                     "CMD",
